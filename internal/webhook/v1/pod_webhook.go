@@ -104,37 +104,47 @@ func (d *PodCustomDefaulter) Default(ctx context.Context, obj runtime.Object) er
 	// Inject sidecar container if Annotations are present
 	if metav1.HasAnnotation(vm.ObjectMeta, constants.VRouterConfigAnnotation) {
 		podlog.Info("Injecting sidecar container into Pod", "name", pod.GetName(), "sidecarImage", constants.SidecarContainerImage)
-		for _, container := range pod.Spec.InitContainers {
+		for _, container := range pod.Spec.Containers {
 			if container.Name == constants.SidecarContainer {
 				podlog.Info("Sidecar container already exists in Pod", "name", pod.GetName())
 				return nil // Sidecar already exists, no need to add it again
 			}
 		}
+
+		index := -1
+		for i, container := range pod.Spec.Containers {
+			if container.Name == "compute" {
+				index = i
+				break
+			}
+		}
+
+		if index == -1 {
+			podlog.Info("No compute container found")
+			return fmt.Errorf("no compute container found in Pod %s", pod.GetName())
+		}
+
 		pod.Spec.AutomountServiceAccountToken = ptr.To(true)
 		pod.Spec.ServiceAccountName = "vrouter-operator-controller-manager" // TODO fix it with proper way, or mount service account token with volume
 		pod.Annotations[constants.VRouterConfigAnnotation] = vm.Annotations[constants.VRouterConfigAnnotation]
-		pod.Spec.InitContainers = append(pod.Spec.InitContainers, corev1.Container{
-			Name:          constants.SidecarContainer,
-			Image:         constants.SidecarContainerImage,
-			RestartPolicy: ptr.To(corev1.ContainerRestartPolicyAlways),
-			Env: []corev1.EnvVar{
-				{
+		pod.Spec.Containers = append(pod.Spec.Containers, corev1.Container{
+			Name:  constants.SidecarContainer,
+			Image: constants.SidecarContainerImage,
+			//RestartPolicy: ptr.To(corev1.ContainerRestartPolicyAlways),
+			Env: append(
+				pod.Spec.Containers[index].Env,
+				corev1.EnvVar{
 					Name: "POD_NAMESPACE",
 					ValueFrom: &corev1.EnvVarSource{
 						FieldRef: &corev1.ObjectFieldSelector{
 							FieldPath: "metadata.namespace",
 						},
 					},
+				}, corev1.EnvVar{
+					Name:  "LIBVIRT_DEFAULT_URI",
+					Value: "qemu:///session",
 				},
-				{
-					Name: "POD_NAME",
-					ValueFrom: &corev1.EnvVarSource{
-						FieldRef: &corev1.ObjectFieldSelector{
-							FieldPath: "metadata.name",
-						},
-					},
-				},
-			},
+			),
 			SecurityContext: &corev1.SecurityContext{
 				AllowPrivilegeEscalation: ptr.To(false),
 				Privileged:               ptr.To(false),
@@ -142,12 +152,7 @@ func (d *PodCustomDefaulter) Default(ctx context.Context, obj runtime.Object) er
 				RunAsNonRoot:             ptr.To(true),
 				RunAsGroup:               ptr.To(int64(107)), // TODO 107 is the group ID for the qemu group
 			},
-			VolumeMounts: []corev1.VolumeMount{
-				{
-					Name:      "libvirt-runtime",
-					MountPath: "/var/run/libvirt",
-				},
-			},
+			VolumeMounts: pod.Spec.Containers[index].VolumeMounts,
 		})
 	}
 
