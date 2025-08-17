@@ -4,3 +4,30 @@ resources:
 
 configurations:
 - kustomizeconfig.yaml
+
+patches:
+- patch: |-
+    - op: add
+      path: /webhooks/0/objectSelector
+      value:
+        matchExpressions:
+        - key: "vm.kubevirt.io/name"
+          operator: Exists
+  target:
+    group: admissionregistration.k8s.io
+    version: v1
+    kind: MutatingWebhookConfiguration
+    name: mutating-webhook-configuration
+
+- patch: |-
+    - op: add
+      path: /webhooks/0/objectSelector
+      value:
+        matchExpressions:
+        - key: "vm.kubevirt.io/name"
+          operator: Exists
+  target:
+    group: admissionregistration.k8s.io
+    version: v1
+    kind: ValidatingWebhookConfiguration
+    name: validating-webhook-configuration

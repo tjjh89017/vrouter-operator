@@ -51,7 +51,10 @@ func SetupPodWebhookWithManager(mgr ctrl.Manager) error {
 
 // TODO(user): EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
 
-// +kubebuilder:webhook:path=/mutate--v1-pod,mutating=true,failurePolicy=fail,sideEffects=None,groups="",resources=pods,verbs=create;update,versions=v1,name=mpod-v1.kb.io,admissionReviewVersions=v1
+// +kubebuilder:webhook:path=/mutate--v1-pod,mutating=true,failurePolicy=fail,sideEffects=None,groups="",resources=pods,verbs=create,versions=v1,name=mpod-v1.kb.io,admissionReviewVersions=v1
+
+// +kubebuilder:rbac:groups=kubevirt.io,resources=virtualmachines,verbs=get;list;watch
+// +kubebuilder:rbac:groups=kubevirt.io,resources=virtualmachines/status,verbs=get
 
 // PodCustomDefaulter struct is responsible for setting default values on the custom resource of the
 // Kind Pod when those are created or updated.
@@ -72,6 +75,12 @@ func (d *PodCustomDefaulter) Default(ctx context.Context, obj runtime.Object) er
 	if !ok {
 		return fmt.Errorf("expected an Pod object but got %T", obj)
 	}
+
+	if metav1.HasAnnotation(pod.ObjectMeta, constants.VRouterConfigAnnotation) {
+		podlog.Info("Pod already has VRouterConfigAnnotation, skipping defaulting", "name", pod.GetName())
+		return nil // No need to default if the annotation is already present
+	}
+
 	podlog.Info("Defaulting for Pod", "name", pod.GetName())
 
 	// Check if the Pod is a KubeVirt VirtualMachineInstance
@@ -83,6 +92,8 @@ func (d *PodCustomDefaulter) Default(ctx context.Context, obj runtime.Object) er
 	podlog.Info("Detected a KubeVirt VirtualMachineInstance", "name", pod.GetName())
 	namespace := pod.GetNamespace()
 	vmName := pod.GetLabels()[kubevirtv1.VirtualMachineNameLabel]
+
+	podlog.Info("Retrieving VirtualMachine", "name", vmName, "namespace", namespace)
 
 	vm := &kubevirtv1.VirtualMachine{}
 	if err := d.Get(ctx, client.ObjectKey{Namespace: namespace, Name: vmName}, vm); err != nil {
@@ -99,8 +110,10 @@ func (d *PodCustomDefaulter) Default(ctx context.Context, obj runtime.Object) er
 				return nil // Sidecar already exists, no need to add it again
 			}
 		}
-		pod.Spec.ServiceAccountName = "controller-manager" // TODO fix it with proper way, or mount service account token with volume
-		pod.Spec.InitContainers = append(pod.Spec.Containers, corev1.Container{
+		pod.Spec.AutomountServiceAccountToken = ptr.To(true)
+		pod.Spec.ServiceAccountName = "vrouter-operator-controller-manager" // TODO fix it with proper way, or mount service account token with volume
+		pod.Annotations[constants.VRouterConfigAnnotation] = vm.Annotations[constants.VRouterConfigAnnotation]
+		pod.Spec.InitContainers = append(pod.Spec.InitContainers, corev1.Container{
 			Name:          constants.SidecarContainer,
 			Image:         constants.SidecarContainerImage,
 			RestartPolicy: ptr.To(corev1.ContainerRestartPolicyAlways),

@@ -24,7 +24,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
+	corev1 "k8s.io/api/core/v1"
+
 	vrouterv1 "github.com/tjjh89017/vrouter-operator/api/v1"
+	"github.com/tjjh89017/vrouter-operator/constants"
 )
 
 // VRouterConfigReconciler reconciles a VRouterConfig object
@@ -55,6 +58,37 @@ func (r *VRouterConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	logger.Info("Reconciling VRouterConfig", "name", req.Name, "namespace", req.Namespace)
 
 	// TODO(user): your logic here
+	pod := &corev1.Pod{}
+	if err := r.Get(ctx, client.ObjectKey{Namespace: r.Namespace, Name: r.Name}, pod); err != nil {
+		logger.Error(err, "Failed to get Pod", "name", r.Name, "namespace", r.Namespace)
+		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
+
+	vrouterConfigName := pod.Annotations[constants.VRouterConfigAnnotation]
+
+	if vrouterConfigName != req.Name {
+		logger.Info("This is not my config, skip", "expected", req.Name, "found", vrouterConfigName)
+		return ctrl.Result{}, nil
+	}
+
+	logger.Info("VRouterConfig found, processing", "name", vrouterConfigName)
+	vrouterConfig := &vrouterv1.VRouterConfig{}
+	if err := r.Get(ctx, client.ObjectKey{Namespace: r.Namespace, Name: vrouterConfigName}, vrouterConfig); err != nil {
+		logger.Error(err, "Failed to get VRouterConfig", "name", vrouterConfigName, "namespace", r.Namespace)
+		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
+
+	// TODO put config to VyOS
+
+	// Wait for QEMU-GA to be ready
+
+	// Wait for vyos-router to be ready
+
+	// generate script with config
+
+	// push script to vyos
+
+	// execute script on vyos
 
 	return ctrl.Result{}, nil
 }
