@@ -31,6 +31,9 @@ import (
 type VRouterConfigReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+
+	Namespace string
+	Name      string
 }
 
 // +kubebuilder:rbac:groups=vrouter.kojuro.date,resources=vrouterconfigs,verbs=get;list;watch;create;update;patch;delete
@@ -47,7 +50,9 @@ type VRouterConfigReconciler struct {
 // For more details, check Reconcile and its Result here:
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.21.0/pkg/reconcile
 func (r *VRouterConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	_ = logf.FromContext(ctx)
+	logger := logf.FromContext(ctx)
+
+	logger.Info("Reconciling VRouterConfig", "name", req.Name, "namespace", req.Namespace)
 
 	// TODO(user): your logic here
 

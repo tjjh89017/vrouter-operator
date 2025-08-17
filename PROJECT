@@ -20,4 +20,17 @@ resources:
   kind: VRouterConfig
   path: github.com/tjjh89017/vrouter-operator/api/v1
   version: v1
+  webhooks:
+    defaulting: true
+    validation: true
+    webhookVersion: v1
+- core: true
+  group: core
+  kind: Pod
+  path: k8s.io/api/core/v1
+  version: v1
+  webhooks:
+    defaulting: true
+    validation: true
+    webhookVersion: v1
 version: "3"

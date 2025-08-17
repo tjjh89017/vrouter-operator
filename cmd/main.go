@@ -39,7 +39,11 @@ import (
 
 	vrouterv1 "github.com/tjjh89017/vrouter-operator/api/v1"
 	"github.com/tjjh89017/vrouter-operator/internal/controller"
+	webhookv1 "github.com/tjjh89017/vrouter-operator/internal/webhook/v1"
+
 	// +kubebuilder:scaffold:imports
+
+	kubevirtv1 "kubevirt.io/api/core/v1"
 )
 
 var (
@@ -52,6 +56,8 @@ func init() {
 
 	utilruntime.Must(vrouterv1.AddToScheme(scheme))
 	// +kubebuilder:scaffold:scheme
+
+	utilruntime.Must(kubevirtv1.AddToScheme(scheme))
 }
 
 // nolint:gocyclo
@@ -63,6 +69,7 @@ func main() {
 	var probeAddr string
 	var secureMetrics bool
 	var enableHTTP2 bool
+	var enableWebhook bool
 	var tlsOpts []func(*tls.Config)
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
@@ -81,6 +88,8 @@ func main() {
 	flag.StringVar(&metricsCertKey, "metrics-cert-key", "tls.key", "The name of the metrics server key file.")
 	flag.BoolVar(&enableHTTP2, "enable-http2", false,
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
+	flag.BoolVar(&enableWebhook, "enable-webhooks", true,
+		"If set, webhooks will be enabled for the controller.")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -202,14 +211,29 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := (&controller.VRouterConfigReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
-	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "VRouterConfig")
-		os.Exit(1)
+	if enableWebhook {
+		setupLog.Info("Webhook mode")
+		if err := webhookv1.SetupVRouterConfigWebhookWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to create webhook", "webhook", "VRouterConfig")
+			os.Exit(1)
+		}
+		if err := webhookv1.SetupPodWebhookWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to create webhook", "webhook", "Pod")
+			os.Exit(1)
+		}
+	} else {
+		setupLog.Info("Controller mode")
+		if err := (&controller.VRouterConfigReconciler{
+			Client:    mgr.GetClient(),
+			Scheme:    mgr.GetScheme(),
+			Namespace: os.Getenv("POD_NAMESPACE"),
+			Name:      os.Getenv("POD_NAME"),
+		}).SetupWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to create controller", "controller", "VRouterConfig")
+			os.Exit(1)
+		}
+		// +kubebuilder:scaffold:builder
 	}
-	// +kubebuilder:scaffold:builder
 
 	if metricsCertWatcher != nil {
 		setupLog.Info("Adding metrics certificate watcher to manager")
