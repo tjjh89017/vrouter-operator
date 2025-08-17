@@ -1,0 +1,9 @@
+apiVersion: vrouter.kojuro.date/v1
+kind: VRouterConfig
+metadata:
+  labels:
+    app.kubernetes.io/name: vrouter-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: vrouterconfig-sample
+spec:
+  # TODO(user): Add fields here

@@ -1,0 +1,4 @@
+## Append samples of your project ##
+resources:
+- vrouter_v1_vrouterconfig.yaml
+# +kubebuilder:scaffold:manifestskustomizesamples
