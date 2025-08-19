@@ -24,6 +24,50 @@ packages = ["qemu-guest-agent"]
     console_num = '0'
 ```
 
+# Prepare a ServiceAccount in your namespace for KubeVirt VM
+
+The following example creates a ServiceAccount in default namespace.
+
+> [!NOTE]
+> Please note, the service account name should be `vrouter-operator-controller-manager`
+
+
+```
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  labels:
+  name: vrouter-operator-controller-manager
+  namespace: default
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: default-namespace-vrouterconfig-viewer-role-binding
+subjects:
+- kind: ServiceAccount
+  name: vrouter-operator-controller-manager
+  namespace: default
+roleRef:
+  kind: ClusterRole
+  name: vrouter-operator-vrouterconfig-viewer-role
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: default-namespace-view
+subjects:
+- kind: ServiceAccount
+  name: vrouter-operator-controller-manager
+  namespace: default
+roleRef:
+  kind: ClusterRole
+  name: view
+  apiGroup: rbac.authorization.k8s.io
+```
+
 # Prepare VRouterConfig
 
 Some example as below
