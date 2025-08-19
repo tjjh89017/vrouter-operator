@@ -28,8 +28,8 @@ type VRouterConfigSpec struct {
 	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
 	// Important: Run "make" to regenerate code after modifying this file
 
-	Config  string   `json:"config,omitempty"`
-	Command []string `json:"command,omitempty"`
+	Config  string `json:"config,omitempty"`
+	Command string `json:"command,omitempty"`
 }
 
 // VRouterConfigStatus defines the observed state of VRouterConfig.

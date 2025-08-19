@@ -19,6 +19,7 @@ package v1
 import (
 	"context"
 	"fmt"
+	"os"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -40,11 +41,18 @@ var podlog = logf.Log.WithName("pod-resource")
 
 // SetupPodWebhookWithManager registers the webhook for Pod in the manager.
 func SetupPodWebhookWithManager(mgr ctrl.Manager) error {
+	sidecarContainerImage := os.Getenv("SIDECAR_CONTAINER_IMAGE")
+	if sidecarContainerImage == "" {
+		sidecarContainerImage = constants.SidecarContainerImage
+	}
+	podlog.Info("Setting up Pod webhook", "sidecarContainerImage", sidecarContainerImage)
+
 	return ctrl.NewWebhookManagedBy(mgr).For(&corev1.Pod{}).
 		WithValidator(&PodCustomValidator{}).
 		WithDefaulter(&PodCustomDefaulter{
-			Client: mgr.GetClient(),
-			Scheme: mgr.GetScheme(),
+			Client:                mgr.GetClient(),
+			Scheme:                mgr.GetScheme(),
+			SidecarContainerImage: sidecarContainerImage,
 		}).
 		Complete()
 }
@@ -64,6 +72,8 @@ func SetupPodWebhookWithManager(mgr ctrl.Manager) error {
 type PodCustomDefaulter struct {
 	client.Client
 	Scheme *runtime.Scheme
+
+	SidecarContainerImage string
 }
 
 var _ webhook.CustomDefaulter = &PodCustomDefaulter{}
@@ -129,7 +139,7 @@ func (d *PodCustomDefaulter) Default(ctx context.Context, obj runtime.Object) er
 		pod.Annotations[constants.VRouterConfigAnnotation] = vm.Annotations[constants.VRouterConfigAnnotation]
 		pod.Spec.Containers = append(pod.Spec.Containers, corev1.Container{
 			Name:  constants.SidecarContainer,
-			Image: constants.SidecarContainerImage,
+			Image: d.SidecarContainerImage,
 			//RestartPolicy: ptr.To(corev1.ContainerRestartPolicyAlways),
 			Env: append(
 				pod.Spec.Containers[index].Env,

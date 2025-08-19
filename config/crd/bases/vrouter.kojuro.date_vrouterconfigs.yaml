@@ -40,9 +40,7 @@ spec:
             description: VRouterConfigSpec defines the desired state of VRouterConfig.
             properties:
               command:
-                items:
-                  type: string
-                type: array
+                type: string
               config:
                 type: string
             type: object

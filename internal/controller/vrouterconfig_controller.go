@@ -447,7 +447,7 @@ func (r *VRouterConfigReconciler) ConfigRenderer(ctx context.Context, vrouterCon
 	}
 	configCommand := ""
 	if len(vrouterConfig.Spec.Command) > 0 {
-		configCommand = fmt.Sprintf("cat <<EOF > /tmp/config.command\n%s\nEOF", strings.Join(vrouterConfig.Spec.Command, "\n"))
+		configCommand = fmt.Sprintf("cat <<EOF > /tmp/config.command\n%s\nEOF", vrouterConfig.Spec.Command)
 	}
 
 	config := fmt.Sprintf(ExecScript, configBoot, configCommand)

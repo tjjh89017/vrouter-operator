@@ -26,7 +26,8 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -o ma
 
 # Use distroless as minimal base image to package the manager binary
 # Refer to https://github.com/GoogleContainerTools/distroless for more details
-FROM ubuntu:latest
+#FROM ubuntu:latest
+FROM debian:forky-slim
 
 RUN apt update && apt install -y libvirt-clients
 RUN groupadd --gid 107 libvirt
