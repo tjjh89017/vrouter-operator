@@ -1,6 +1,10 @@
 # vrouter-operator
 Deploy your vRouter(vyos) in your Kubernetes with KubeVirt
 
+# Full Guide with Video here
+
+https://hackmd.io/@TJibejKyT3OH1YR5f1duzg/ryMdLbvigx
+
 # Demo Video
 
 Youtube Link: [https://www.youtube.com/watch?v=pvdPgob3jAE](https://www.youtube.com/watch?v=pvdPgob3jAE)
