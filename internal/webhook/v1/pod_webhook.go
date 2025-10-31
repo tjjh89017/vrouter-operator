@@ -140,6 +140,7 @@ func (d *PodCustomDefaulter) Default(ctx context.Context, obj runtime.Object) er
 		pod.Spec.Containers = append(pod.Spec.Containers, corev1.Container{
 			Name:  constants.SidecarContainer,
 			Image: d.SidecarContainerImage,
+			ImagePullPolicy: corev1.PullIfNotPresent,
 			//RestartPolicy: ptr.To(corev1.ContainerRestartPolicyAlways),
 			Env: append(
 				pod.Spec.Containers[index].Env,
