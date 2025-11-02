@@ -132,6 +132,8 @@ then
 fi
 commit
 
+%s
+
 # clean up
 rm -f /tmp/config.boot
 rm -f /tmp/config.command
@@ -449,8 +451,12 @@ func (r *VRouterConfigReconciler) ConfigRenderer(ctx context.Context, vrouterCon
 	if len(vrouterConfig.Spec.Command) > 0 {
 		configCommand = fmt.Sprintf("cat <<EOF > /tmp/config.command\n%s\nEOF", vrouterConfig.Spec.Command)
 	}
+	saveCommand := ""
+	if vrouterConfig.Spec.Save {
+		saveCommand = "save"
+	}
 
-	config := fmt.Sprintf(ExecScript, configBoot, configCommand)
+	config := fmt.Sprintf(ExecScript, configBoot, configCommand, saveCommand)
 	logger.Info("Rendered Config", "config", config)
 
 	return config, nil
