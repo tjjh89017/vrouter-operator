@@ -30,6 +30,7 @@ type VRouterConfigSpec struct {
 
 	Config  string `json:"config,omitempty"`
 	Command string `json:"command,omitempty"`
+	Save    bool   `json:"save,omitempty"`
 }
 
 // VRouterConfigStatus defines the observed state of VRouterConfig.

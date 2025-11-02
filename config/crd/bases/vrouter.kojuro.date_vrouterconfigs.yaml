@@ -43,6 +43,8 @@ spec:
                 type: string
               config:
                 type: string
+              save:
+                type: boolean
             type: object
           status:
             description: VRouterConfigStatus defines the observed state of VRouterConfig.
