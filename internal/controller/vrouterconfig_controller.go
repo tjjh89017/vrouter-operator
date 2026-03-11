@@ -57,6 +57,9 @@ type VRouterConfigReconciler struct {
 // +kubebuilder:rbac:groups=kubevirt.io,resources=virtualmachines;virtualmachineinstances,verbs=get;list;watch
 
 var applyScriptTmpl = template.Must(template.New("apply").Parse(`#!/bin/vbash
+if [ "$(id -g -n)" != 'vyattacfg' ] ; then
+    exec sg vyattacfg -c "/bin/vbash $(readlink -f $0) $@"
+fi
 source /opt/vyatta/etc/functions/script-template
 configure
 
