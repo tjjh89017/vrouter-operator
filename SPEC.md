@@ -313,27 +313,17 @@ func renderTemplate(templateStr string, data map[string]interface{}) (string, er
 
 ### 6.1 Defaulting Webhook
 
-Automatically sets finalizers on resource creation via mutating admission webhook.
+No defaulting logic is currently needed; field-level defaults are handled by kubebuilder markers (`+kubebuilder:default=...`).
 
-| Resource | Finalizer | Purpose |
-|----------|-----------|---------|
-| VRouterBinding | `vrouter.kojuro.date/finalizer` | Ensures orphan VRouterConfig cleanup before binding deletion |
+### 6.2 Validating Webhook
 
-```go
-const (
-    FinalizerName = "vrouter.kojuro.date/finalizer"
-    LabelBinding  = "vrouter.kojuro.date/binding"
-    LabelTarget   = "vrouter.kojuro.date/target"
-)
+Performs cross-field validation that kubebuilder JSON schema markers cannot express:
 
-func (r *VRouterBinding) Default() {
-    if r.DeletionTimestamp == nil && !controllerutil.ContainsFinalizer(r, FinalizerName) {
-        controllerutil.AddFinalizer(r, FinalizerName)
-    }
-}
-```
-
-When the BindingController detects `DeletionTimestamp` is set, it performs orphan cleanup (delete all VRouterConfigs by label), then removes the finalizer to allow the binding to be garbage collected.
+| Resource | Validation |
+|----------|------------|
+| VRouterTarget | `provider.kubevirt` must be set when `type=kubevirt`; `provider.proxmox` must be set when `type=proxmox` |
+| VRouterConfig | Same provider cross-field validation as VRouterTarget |
+| VRouterBinding | `spec.targetRefs` must not be empty |
 
 ---
 
@@ -350,6 +340,16 @@ When the BindingController detects `DeletionTimestamp` is set, it performs orpha
 
 Reconcile flow:
 
+```
+if DeletionTimestamp.IsZero():
+    → ensure finalizer present (add if missing, requeue)
+    → reconcileNormal (onChange)
+else:
+    → reconcileDelete (onDelete)
+```
+
+**reconcileNormal (onChange)**:
+
 1. Lookup `templateRef` → get VRouterTemplate
 2. Lookup each `targetRef` → get VRouterTarget
 3. Read `target.provider` — identify router via provider-specific config (KubeVirt: name/namespace, Proxmox: vmid)
@@ -360,9 +360,18 @@ Reconcile flow:
    - `vrouter.kojuro.date/binding` label → binding name (for listing)
    - `vrouter.kojuro.date/target` label → target name (for listing)
    - provider info carried over from VRouterTarget
+7. **Orphan cleanup**: list existing VRouterConfigs by label `vrouter.kojuro.date/binding={name}`, diff against desired set, delete orphans
 
 > **Note on ownerReference**: Uses `controllerutil.SetControllerReference()` with `blockOwnerDeletion: true`. This ensures the binding stays in "Deleting" state (foreground delete) until all dependent VRouterConfigs are cleaned up, making it easier to debug deletion order and verify cleanup completion.
-7. **Orphan cleanup**: list existing VRouterConfigs by label `vrouter.kojuro.date/binding={name}`, diff against desired set, delete orphans
+
+**reconcileDelete (onDelete)**:
+
+VRouterConfigs are owned by the binding via ownerRef, so K8s GC handles cascade deletion automatically. The controller simply removes the finalizer to unblock deletion:
+
+```go
+controllerutil.RemoveFinalizer(binding, FinalizerName)
+return ctrl.Result{}, r.Update(ctx, binding)
+```
 
 ```go
 // Orphan cleanup in BindingController.Reconcile()

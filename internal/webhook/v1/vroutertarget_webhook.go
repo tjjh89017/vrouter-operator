@@ -65,8 +65,6 @@ func (d *VRouterTargetCustomDefaulter) Default(_ context.Context, obj runtime.Ob
 	}
 	vroutertargetlog.Info("Defaulting for VRouterTarget", "name", vroutertarget.GetName())
 
-	// TODO(user): fill in your defaulting logic.
-
 	return nil
 }
 
@@ -94,9 +92,7 @@ func (v *VRouterTargetCustomValidator) ValidateCreate(_ context.Context, obj run
 	}
 	vroutertargetlog.Info("Validation for VRouterTarget upon creation", "name", vroutertarget.GetName())
 
-	// TODO(user): fill in your validation logic upon object creation.
-
-	return nil, nil
+	return nil, validateProviderConfig(vroutertarget.Spec.Provider)
 }
 
 // ValidateUpdate implements webhook.CustomValidator so a webhook will be registered for the type VRouterTarget.
@@ -107,20 +103,16 @@ func (v *VRouterTargetCustomValidator) ValidateUpdate(_ context.Context, oldObj,
 	}
 	vroutertargetlog.Info("Validation for VRouterTarget upon update", "name", vroutertarget.GetName())
 
-	// TODO(user): fill in your validation logic upon object update.
-
-	return nil, nil
+	return nil, validateProviderConfig(vroutertarget.Spec.Provider)
 }
 
 // ValidateDelete implements webhook.CustomValidator so a webhook will be registered for the type VRouterTarget.
-func (v *VRouterTargetCustomValidator) ValidateDelete(ctx context.Context, obj runtime.Object) (admission.Warnings, error) {
+func (v *VRouterTargetCustomValidator) ValidateDelete(_ context.Context, obj runtime.Object) (admission.Warnings, error) {
 	vroutertarget, ok := obj.(*vrouterv1.VRouterTarget)
 	if !ok {
 		return nil, fmt.Errorf("expected a VRouterTarget object but got %T", obj)
 	}
 	vroutertargetlog.Info("Validation for VRouterTarget upon deletion", "name", vroutertarget.GetName())
-
-	// TODO(user): fill in your validation logic upon object deletion.
 
 	return nil, nil
 }
