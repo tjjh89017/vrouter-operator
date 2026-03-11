@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "vrouter-operator.fullname" . }}-metrics
+  labels:
+    control-plane: controller-manager
+  {{- include "vrouter-operator.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.metricsService.type }}
+  selector:
+    app.kubernetes.io/name: vrouter-operator
+    control-plane: controller-manager
+    {{- include "vrouter-operator.selectorLabels" . | nindent 4 }}
+  ports:
+  {{- .Values.metricsService.ports | toYaml | nindent 2 }}

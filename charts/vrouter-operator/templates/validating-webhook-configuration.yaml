@@ -1,0 +1,89 @@
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: {{ include "vrouter-operator.fullname" . }}-validating-webhook-configuration
+  annotations:
+    cert-manager.io/inject-ca-from: {{ .Release.Namespace }}/{{ include "vrouter-operator.fullname" . }}-serving-cert
+  labels:
+  {{- include "vrouter-operator.labels" . | nindent 4 }}
+webhooks:
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: '{{ include "vrouter-operator.fullname" . }}-webhook-service'
+      namespace: '{{ .Release.Namespace }}'
+      path: /validate-vrouter-kojuro-date-v1-vrouterbinding
+  failurePolicy: Fail
+  name: vvrouterbinding-v1.kb.io
+  rules:
+  - apiGroups:
+    - vrouter.kojuro.date
+    apiVersions:
+    - v1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - vrouterbindings
+  sideEffects: None
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: '{{ include "vrouter-operator.fullname" . }}-webhook-service'
+      namespace: '{{ .Release.Namespace }}'
+      path: /validate-vrouter-kojuro-date-v1-vrouterconfig
+  failurePolicy: Fail
+  name: vvrouterconfig-v1.kb.io
+  rules:
+  - apiGroups:
+    - vrouter.kojuro.date
+    apiVersions:
+    - v1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - vrouterconfigs
+  sideEffects: None
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: '{{ include "vrouter-operator.fullname" . }}-webhook-service'
+      namespace: '{{ .Release.Namespace }}'
+      path: /validate-vrouter-kojuro-date-v1-vroutertarget
+  failurePolicy: Fail
+  name: vvroutertarget-v1.kb.io
+  rules:
+  - apiGroups:
+    - vrouter.kojuro.date
+    apiVersions:
+    - v1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - vroutertargets
+  sideEffects: None
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: '{{ include "vrouter-operator.fullname" . }}-webhook-service'
+      namespace: '{{ .Release.Namespace }}'
+      path: /validate-vrouter-kojuro-date-v1-vroutertemplate
+  failurePolicy: Fail
+  name: vvroutertemplate-v1.kb.io
+  rules:
+  - apiGroups:
+    - vrouter.kojuro.date
+    apiVersions:
+    - v1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - vroutertemplates
+  sideEffects: None

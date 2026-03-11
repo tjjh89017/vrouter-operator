@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "vrouter-operator.fullname" . }}-webhook-service
+  labels:
+  {{- include "vrouter-operator.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.webhookService.type }}
+  selector:
+    app.kubernetes.io/name: vrouter-operator
+    control-plane: controller-manager
+    {{- include "vrouter-operator.selectorLabels" . | nindent 4 }}
+  ports:
+  {{- .Values.webhookService.ports | toYaml | nindent 2 }}

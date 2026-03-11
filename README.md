@@ -61,9 +61,15 @@ packages = ["qemu-guest-agent"]
 
 ---
 
+## Installation
+
+> 🚧 Under Construction — release packaging in progress.
+
+---
+
 ## Quick Start
 
-### 1. Install CRDs and deploy the operator
+### 1. Install the operator
 
 ```bash
 make install   # install CRDs into current cluster

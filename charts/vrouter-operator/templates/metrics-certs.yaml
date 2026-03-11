@@ -1,0 +1,15 @@
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ include "vrouter-operator.fullname" . }}-metrics-certs
+  labels:
+  {{- include "vrouter-operator.labels" . | nindent 4 }}
+spec:
+  dnsNames:
+  - '{{ include "vrouter-operator.fullname" . }}-SERVICE_NAME.SERVICE_NAMESPACE.svc'
+  - '{{ include "vrouter-operator.fullname" . }}-SERVICE_NAME.SERVICE_NAMESPACE.svc.{{
+    .Values.kubernetesClusterDomain }}'
+  issuerRef:
+    kind: Issuer
+    name: '{{ include "vrouter-operator.fullname" . }}-selfsigned-issuer'
+  secretName: metrics-server-cert
