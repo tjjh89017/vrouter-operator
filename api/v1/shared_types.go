@@ -25,7 +25,6 @@ type NameRef struct {
 // +kubebuilder:validation:Enum=kubevirt;proxmox
 type ProviderType string
 
-
 // ProviderConfig defines which virtualization backend to use and the target router.
 type ProviderConfig struct {
 	// +kubebuilder:default=kubevirt
