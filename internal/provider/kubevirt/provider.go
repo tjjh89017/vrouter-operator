@@ -181,8 +181,9 @@ func (p *Provider) runQGA(ctx context.Context, agentCmd string) (string, error) 
 	if err != nil {
 		return "", err
 	}
+	domain := p.namespace + "_" + p.vmName
 	stdout, stderr, err := p.execInPod(ctx, pod.Namespace, pod.Name, "compute",
-		[]string{"virsh", "qemu-agent-command", p.vmName, agentCmd})
+		[]string{"virsh", "qemu-agent-command", domain, agentCmd})
 	if err != nil {
 		return "", fmt.Errorf("virsh exec failed (stderr: %s): %w", stderr, err)
 	}
