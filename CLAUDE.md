@@ -30,6 +30,15 @@ make install
 
 # Deploy to cluster
 make deploy IMG=<image>
+
+# Release packaging — single YAML (dist/install.yaml)
+make build-installer IMG=<image>
+
+# Release packaging — Helm chart (regenerate after CRD/manifest changes)
+# Requires: go install github.com/arttor/helmify/cmd/helmify@latest
+# Chart lives in charts/vrouter-operator/; run helm lint before committing
+bin/kustomize build config/default | helmify charts/vrouter-operator
+helm package charts/vrouter-operator  # → vrouter-operator-<version>.tgz
 ```
 
 ## Git

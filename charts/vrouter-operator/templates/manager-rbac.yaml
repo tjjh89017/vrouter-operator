@@ -1,0 +1,77 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "vrouter-operator.fullname" . }}-manager-role
+  labels:
+  {{- include "vrouter-operator.labels" . | nindent 4 }}
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - pods
+  - secrets
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - pods/exec
+  verbs:
+  - create
+- apiGroups:
+  - kubevirt.io
+  resources:
+  - virtualmachineinstances
+  - virtualmachines
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - vrouter.kojuro.date
+  resources:
+  - vrouterbindings
+  - vrouterconfigs
+  - vroutertargets
+  - vroutertemplates
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - vrouter.kojuro.date
+  resources:
+  - vrouterbindings/finalizers
+  - vrouterconfigs/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - vrouter.kojuro.date
+  resources:
+  - vrouterbindings/status
+  - vrouterconfigs/status
+  verbs:
+  - get
+  - patch
+  - update
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "vrouter-operator.fullname" . }}-manager-rolebinding
+  labels:
+  {{- include "vrouter-operator.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: '{{ include "vrouter-operator.fullname" . }}-manager-role'
+subjects:
+- kind: ServiceAccount
+  name: '{{ include "vrouter-operator.serviceAccountName" . }}'
+  namespace: '{{ .Release.Namespace }}'

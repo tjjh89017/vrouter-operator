@@ -1,0 +1,21 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "vrouter-operator.fullname" . }}-vrouterconfig-viewer-role
+  labels:
+  {{- include "vrouter-operator.labels" . | nindent 4 }}
+rules:
+- apiGroups:
+  - vrouter.kojuro.date
+  resources:
+  - vrouterconfigs
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - vrouter.kojuro.date
+  resources:
+  - vrouterconfigs/status
+  verbs:
+  - get
