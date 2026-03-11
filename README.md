@@ -1,158 +1,218 @@
 # vrouter-operator
-Deploy your vRouter(vyos) in your Kubernetes with KubeVirt
 
-# Full Guide with Video here
+A Kubernetes Operator that manages VyOS virtual router configuration running on KubeVirt (and other virtualization backends). Configuration is delivered via QEMU Guest Agent (QGA) over a virtio channel — no network reachability or sidecar injection required.
 
-https://hackmd.io/@TJibejKyT3OH1YR5f1duzg/ryMdLbvigx
+## Demo
 
-# Demo Video
-
-Youtube Link: [https://www.youtube.com/watch?v=pvdPgob3jAE](https://www.youtube.com/watch?v=pvdPgob3jAE)
+YouTube: [https://www.youtube.com/watch?v=pvdPgob3jAE](https://www.youtube.com/watch?v=pvdPgob3jAE)
 
 [![vRouter-Operator-Demo](http://img.youtube.com/vi/pvdPgob3jAE/0.jpg)](https://www.youtube.com/watch?v=pvdPgob3jAE "vRouter-Operator Demo")
 
-# Prepare VyOS VM image
+Full guide: https://hackmd.io/@TJibejKyT3OH1YR5f1duzg/ryMdLbvigx
 
-Prepare your VyOS image with the following build flavor. You still can build with `ttyS0` if you need.
+---
 
-> [!NOTE]
-> Please install `qemu-guest-agent` without `cloud-init`, mostly, we don't need that.
+## How It Works
 
-```yaml
-# VyOS image for generic KVM
+```
+VRouterTemplate  +  VRouterTarget  +  VRouterBinding
+                          │
+                  BindingController
+                  → merge params (binding → target)
+                  → render template
+                  → create VRouterConfig per target
+                          │
+                  VRouterController
+                  → wait for VM running (VMI watch)
+                  → wait for vyos-router.service active (exited)
+                  → write rendered script via QGA
+                  → execute script via QGA
+                  → update status
+```
 
+| CRD | Short name | Purpose |
+|-----|-----------|---------|
+| `VRouterTemplate` | `vrtt` | Go `text/template` config/command template |
+| `VRouterTarget` | `vrt` | Target VM + provider config + default params |
+| `VRouterBinding` | `vrb` | Binds a template to one or more targets |
+| `VRouterConfig` | `vrc` | Final rendered config applied to one router (auto-generated or direct) |
+
+---
+
+## Prerequisites
+
+- Kubernetes cluster with KubeVirt installed (tested on Harvester)
+- cert-manager (for webhook TLS)
+- VyOS VM image with `qemu-guest-agent` installed (no `cloud-init` needed)
+
+### Build VyOS image
+
+```toml
+# VyOS image build flavor
 image_format = "qcow2"
 image_opts = "-c"
-
 disk_size = 4
-
 packages = ["qemu-guest-agent"]
 
-# GRUB console settings
 [boot_settings]
     console_type = "tty"
     console_num = '0'
 ```
 
-# Prepare a ServiceAccount in your namespace for KubeVirt VM
-
-The following example creates a ServiceAccount in default namespace.
-
-> [!NOTE]
-> Please note, the service account name should be `vrouter-operator-controller-manager`
-
-
-```
 ---
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  labels:
-  name: vrouter-operator-controller-manager
-  namespace: default
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: default-namespace-vrouterconfig-viewer-role-binding
-subjects:
-- kind: ServiceAccount
-  name: vrouter-operator-controller-manager
-  namespace: default
-roleRef:
-  kind: ClusterRole
-  name: vrouter-operator-vrouterconfig-viewer-role
-  apiGroup: rbac.authorization.k8s.io
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: default-namespace-view
-subjects:
-- kind: ServiceAccount
-  name: vrouter-operator-controller-manager
-  namespace: default
-roleRef:
-  kind: ClusterRole
-  name: view
-  apiGroup: rbac.authorization.k8s.io
+
+## Quick Start
+
+### 1. Install CRDs and deploy the operator
+
+```bash
+make install   # install CRDs into current cluster
+make deploy IMG=<your-image>
 ```
 
-# Prepare VRouterConfig
+### 2. Create a VRouterTemplate
 
-Some example as below
+Define config/commands using Go `text/template` syntax with [sprig](https://masterminds.github.io/sprig/) functions:
+
+```yaml
+apiVersion: vrouter.kojuro.date/v1
+kind: VRouterTemplate
+metadata:
+  name: hostname-template
+  namespace: default
+spec:
+  commands: |
+    set system host-name '{{ .hostname }}'
+```
+
+### 3. Create a VRouterTarget
+
+Point to the KubeVirt VM and provide default params:
+
+```yaml
+apiVersion: vrouter.kojuro.date/v1
+kind: VRouterTarget
+metadata:
+  name: vyos-with-operator
+  namespace: default
+spec:
+  provider:
+    type: kubevirt
+    kubevirt:
+      name: vyos-with-operator   # VirtualMachine name
+      namespace: default
+  params:
+    hostname: "my-vyos-router"
+```
+
+### 4. Create a VRouterBinding
+
+Bind the template to one or more targets:
+
+```yaml
+apiVersion: vrouter.kojuro.date/v1
+kind: VRouterBinding
+metadata:
+  name: hostname-binding
+  namespace: default
+spec:
+  templateRef:
+    name: hostname-template
+  save: true          # persist config after commit (default: true)
+  targetRefs:
+    - name: vyos-with-operator
+```
+
+The operator will automatically create a `VRouterConfig` for each target and apply it to the VM via QGA.
+
+### 5. Check status
+
+```bash
+kubectl get vrc                  # or: kubectl get vrouterconfig
+kubectl get vrb                  # or: kubectl get vrouterbinding
+kubectl wait vrc/hostname-binding.vyos-with-operator --for=condition=Applied
+```
+
+---
+
+## Direct VRouterConfig (without Binding)
+
+For simple cases or direct management, create a `VRouterConfig` directly:
 
 ```yaml
 apiVersion: vrouter.kojuro.date/v1
 kind: VRouterConfig
 metadata:
-  name: vrouterconfig-sample
+  name: my-router-config
+  namespace: default
 spec:
+  provider:
+    type: kubevirt
+    kubevirt:
+      name: vyos-with-operator
+      namespace: default
+  save: true
   config: |
     system {
-        host-name vyos-k8s-demo
-        login {
-            user vyos {
-                authentication {
-                    encrypted-password $6$QxPS.uk6mfo$9QBSo8u1FkH16gMyAVhus6fU3LOzvLR9Z9.82m3tiHFAxTtIkhaZSWssSgzt4v4dGAL8rhVQxTg0oAG9/q11h/
-                    plaintext-password ""
-                }
-            }
-        }
-        syslog {
-            global {
-                facility all {
-                    level info
-                }
-                facility protocols {
-                    level debug
-                }
-            }
-        }
-        ntp {
-            allow-client {
-                address 127.0.0.0/8
-                address 169.254.0.0/16
-                address 10.0.0.0/8
-                address 172.16.0.0/12
-                address 192.168.0.0/16
-                address ::1/128
-                address fe80::/10
-                address fc00::/7
-            }
-            server "time1.vyos.net"
-            server "time2.vyos.net"
-            server "time3.vyos.net"
-        }
-        console {
-            device ttyS0 {
-                speed 115200
-            }
-        }
-        config-management {
-            commit-revisions 100
-        }
+        host-name my-vyos-router
     }
-    
-    interfaces {
-        loopback lo {
-        }
-    }
-  command: |
-    set system host-name 'VyOS-1'
-    set interface eth eth0 address dhcp 
+  commands: |
+    set system host-name 'my-vyos-router'
 ```
 
-# Prepare KubeVirt VM for VyOS
+---
 
-Prepare a KubeVirt VM CRD as you need for the VyOS VM. And put annotations like:
+## Params Merge
 
-```yaml
-apiVersion: kubevirt.io/v1
-kind: VirtualMachine
-metadata:
-  annotations:
-    vrouter.kojuro.date/config: vrouterconfig-sample
-  name: vyos
-  namespace: default
+When a `VRouterBinding` has both `params` and its `VRouterTarget` has `params`, they are merged with **target params taking priority**:
+
 ```
+final params = binding.params ← target.params
+```
+
+---
+
+## VRouterConfig Status
+
+| Phase | Meaning |
+|-------|---------|
+| `Pending` | Waiting for VM to be ready |
+| `Applying` | Script dispatched, waiting for completion |
+| `Applied` | Config applied successfully |
+| `Failed` | Script exited with non-zero code (no auto-retry; edit spec to retry) |
+
+The `Applied` condition is set for `kubectl wait` support:
+
+```bash
+kubectl wait vrc/<name> --for=condition=Applied --timeout=120s
+```
+
+---
+
+## Provider Support
+
+| Provider | Status | Notes |
+|----------|--------|-------|
+| KubeVirt | ✅ Supported | Same-cluster KubeVirt; SPDY exec into virt-launcher pod |
+| Proxmox VE | 🚧 Planned | REST API + QGA; credentials via Secret |
+
+---
+
+## Development
+
+```bash
+# Build
+make build
+
+# Run locally (webhooks disabled)
+ENABLE_WEBHOOKS=false go run ./cmd/main.go
+
+# Run tests
+make test
+
+# After modifying api/v1/ types
+make generate   # regenerate zz_generated.deepcopy.go
+make manifests  # regenerate CRDs and RBAC
+```
+
+> All commits require DCO sign-off: `git commit -s`
