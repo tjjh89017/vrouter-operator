@@ -29,3 +29,7 @@ const (
 	PhaseApplied  = "Applied"
 	PhaseFailed   = "Failed"
 )
+
+// ConditionApplied is the condition type used for kubectl wait support.
+// Status=True when phase=Applied; Status=False when phase=Failed or Applying.
+const ConditionApplied = "Applied"

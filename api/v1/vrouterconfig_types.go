@@ -42,9 +42,13 @@ type VRouterConfigStatus struct {
 	LastAppliedTime *metav1.Time `json:"lastAppliedTime,omitempty"`
 	// +optional
 	Message string `json:"message,omitempty"`
-	// ObservedGeneration is the generation last successfully applied.
+	// ObservedGeneration is the generation for which exec was last dispatched.
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+	// Conditions for kubectl wait support.
+	// The "Applied" condition is True when phase=Applied.
+	// +optional
+	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }
 
 // +kubebuilder:object:root=true
