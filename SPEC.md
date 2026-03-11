@@ -421,35 +421,52 @@ type Provider interface {
 }
 ```
 
-**Reconcile flow** (`phase` is display-only; no phase-based branching):
+**Reconcile flow:**
 
 ```
-Every reconcile:
+Reconcile():
+  if DeletionTimestamp set → onDelete (remove finalizer)
+  if finalizer missing    → add finalizer, requeue
+  → onChange
 
-1. CheckReady()
-   → fail → return error (controller requeues with backoff)
+onChange():
+  1. CheckReady()
+     → fail → return error (controller requeues with backoff)
 
-2. if generation == observedGeneration:
-     if execPID > 0:
-       GetExecStatus(execPID)
-       → still running → requeue(3s)
-       → exitCode == 0 → clear PID, set phase=Applied, lastAppliedTime=now, return nil
-       → exitCode != 0 → clear PID, set phase=Failed, message=stderr, return nil
-     else:
-       return nil  ← already done for this generation (Applied or Failed)
+  2. if generation == observedGeneration:
+       if execPID > 0:
+         GetExecStatus(execPID)
+         → still running → requeue(3s)
+         → exitCode == 0 → clear PID, set phase=Applied, condition Applied=True, return nil
+         → exitCode != 0 → clear PID, set phase=Failed, condition Applied=False, return nil
+       else:
+         return nil  ← already done for this generation (Applied or Failed)
 
-3. (generation > observedGeneration → new spec to apply)
-   render internal script template
-   WriteFile("/tmp/vrouter-apply.sh", script)
-   pid = ExecScript("/tmp/vrouter-apply.sh")
-   set execPID=pid, observedGeneration=generation, phase=Applying
-   return requeue(3s)
+  3. (generation > observedGeneration → new spec)
+     render internal script template
+     WriteFile(script)          ← path fixed inside provider
+     pid = ExecScript()         ← path fixed inside provider
+     set execPID=pid, observedGeneration=generation, phase=Applying
+     return requeue(3s)
+
+onDelete():
+  remove finalizer → unblock deletion
 ```
 
 **Key semantics:**
 - `generation == observedGeneration` → exec for this spec version has been dispatched (running or finished)
 - `generation > observedGeneration` → new spec available, dispatch exec
 - Failed phase has no auto-retry; user updates spec (increments generation) to re-trigger
+
+**Condition (for `kubectl wait`):**
+
+| Condition type | Status=True | Status=False |
+|----------------|-------------|--------------|
+| `Applied` | phase=Applied | phase=Failed or Applying |
+
+```bash
+kubectl wait --for=condition=Applied vrouterconfig/myconfig --timeout=60s
+```
 
 ### 7.3 Internal Script Template
 
@@ -666,6 +683,10 @@ type VRouterConfigStatus struct {
     // Used with metadata.generation to detect new spec versions.
     // +optional
     ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+    // Conditions for kubectl wait support. The "Applied" condition is True
+    // when phase=Applied and False when phase=Failed or Applying.
+    // +optional
+    Conditions []metav1.Condition `json:"conditions,omitempty"`
 }
 ```
 

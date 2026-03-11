@@ -24,11 +24,13 @@ import (
 	"text/template"
 	"time"
 
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	vrouterv1 "github.com/tjjh89017/vrouter-operator/api/v1"
@@ -83,14 +85,30 @@ type scriptData struct {
 const requeueAfter = 3 * time.Second
 
 func (r *VRouterConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	log := logf.FromContext(ctx)
-
 	var cfg vrouterv1.VRouterConfig
 	if err := r.Get(ctx, req.NamespacedName, &cfg); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	// Build provider bound to this config's target.
+	if !cfg.DeletionTimestamp.IsZero() {
+		return r.onDelete(ctx, req, &cfg)
+	}
+
+	// Ensure finalizer is present (only for non-deleting objects).
+	if !controllerutil.ContainsFinalizer(&cfg, vrouterv1.FinalizerName) {
+		controllerutil.AddFinalizer(&cfg, vrouterv1.FinalizerName)
+		if err := r.Update(ctx, &cfg); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{Requeue: true}, nil
+	}
+
+	return r.onChange(ctx, req, &cfg)
+}
+
+func (r *VRouterConfigReconciler) onChange(ctx context.Context, _ ctrl.Request, cfg *vrouterv1.VRouterConfig) (ctrl.Result, error) {
+	log := logf.FromContext(ctx)
+
 	prov, err := provider.New(cfg.Spec.Provider, r.Client, r.RestConfig)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("build provider: %w", err)
@@ -105,14 +123,19 @@ func (r *VRouterConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// Step 2: if exec already dispatched for this generation, poll its result.
 	if cfg.Generation == cfg.Status.ObservedGeneration {
 		if cfg.Status.ExecPID > 0 {
-			return r.pollExecStatus(ctx, &cfg, prov)
+			return r.pollExecStatus(ctx, cfg, prov)
 		}
 		// Already done (Applied or Failed) for this generation.
 		return ctrl.Result{}, nil
 	}
 
 	// Step 3: new spec — render and apply.
-	return r.applyConfig(ctx, &cfg, prov)
+	return r.applyConfig(ctx, cfg, prov)
+}
+
+func (r *VRouterConfigReconciler) onDelete(ctx context.Context, _ ctrl.Request, cfg *vrouterv1.VRouterConfig) (ctrl.Result, error) {
+	controllerutil.RemoveFinalizer(cfg, vrouterv1.FinalizerName)
+	return ctrl.Result{}, r.Update(ctx, cfg)
 }
 
 // pollExecStatus checks the running script and updates status accordingly.
@@ -141,10 +164,24 @@ func (r *VRouterConfigReconciler) pollExecStatus(ctx context.Context, cfg *vrout
 		cfg.Status.Phase = vrouterv1.PhaseApplied
 		cfg.Status.LastAppliedTime = &now
 		cfg.Status.Message = ""
+		meta.SetStatusCondition(&cfg.Status.Conditions, metav1.Condition{
+			Type:               vrouterv1.ConditionApplied,
+			Status:             metav1.ConditionTrue,
+			Reason:             "ConfigApplied",
+			Message:            "Configuration applied successfully.",
+			ObservedGeneration: cfg.Generation,
+		})
 		log.Info("config applied successfully")
 	} else {
 		cfg.Status.Phase = vrouterv1.PhaseFailed
 		cfg.Status.Message = fmt.Sprintf("exitCode=%d stderr=%s", status.ExitCode, strings.TrimSpace(status.Stderr))
+		meta.SetStatusCondition(&cfg.Status.Conditions, metav1.Condition{
+			Type:               vrouterv1.ConditionApplied,
+			Status:             metav1.ConditionFalse,
+			Reason:             "ConfigFailed",
+			Message:            cfg.Status.Message,
+			ObservedGeneration: cfg.Generation,
+		})
 		log.Info("config apply failed", "exitCode", status.ExitCode, "stderr", status.Stderr)
 	}
 	return ctrl.Result{}, r.Status().Patch(ctx, cfg, patch)
@@ -154,7 +191,6 @@ func (r *VRouterConfigReconciler) pollExecStatus(ctx context.Context, cfg *vrout
 func (r *VRouterConfigReconciler) applyConfig(ctx context.Context, cfg *vrouterv1.VRouterConfig, prov provider.Provider) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
-	// Render internal script template.
 	var buf bytes.Buffer
 	if err := applyScriptTmpl.Execute(&buf, scriptData{
 		Config:   cfg.Spec.Config,
@@ -163,21 +199,17 @@ func (r *VRouterConfigReconciler) applyConfig(ctx context.Context, cfg *vrouterv
 	}); err != nil {
 		return ctrl.Result{}, fmt.Errorf("render script: %w", err)
 	}
-	script := buf.Bytes()
 
-	// Write script to router.
-	if err := prov.WriteFile(ctx, script); err != nil {
+	if err := prov.WriteFile(ctx, buf.Bytes()); err != nil {
 		return ctrl.Result{}, fmt.Errorf("write script: %w", err)
 	}
 
-	// Execute script asynchronously.
 	pid, err := prov.ExecScript(ctx)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("exec script: %w", err)
 	}
 	log.Info("script dispatched", "pid", pid)
 
-	// Record PID and observedGeneration.
 	patch := client.MergeFrom(cfg.DeepCopy())
 	cfg.Status.ExecPID = pid
 	cfg.Status.ObservedGeneration = cfg.Generation

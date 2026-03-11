@@ -49,7 +49,7 @@ This is a **kubebuilder/operator-sdk** operator (Go module: `github.com/tjjh8901
 | `api/v1/` | CRD type definitions (flat, no subfolders) |
 | `internal/controller/` | Reconcilers for all 4 CRDs |
 | `internal/webhook/v1/` | Defaulting + validating webhooks for all 4 CRDs |
-| `internal/provider/` | Provider interface + per-backend implementations (to be created; see `SPEC.md §2.2–2.4`) |
+| `internal/provider/` | Provider interface (`types/`), factory (`provider.go`), KubeVirt impl (`kubevirt/`), Proxmox stub (`proxmox/`), shared QGA constants (`qga/`) |
 | `config/` | Kustomize manifests (CRDs, RBAC, webhook config) |
 | `cmd/main.go` | Manager entrypoint; registers all controllers and webhooks |
 
@@ -65,8 +65,10 @@ Provider identification: KubeVirt uses `KubeVirtConfig.Name` (VM name), Proxmox 
 
 See `SPEC.md §7` for full reconcile flows and the internal vbash script template.
 
-- **BindingController**: Finalizer is managed in the reconcile loop (not the webhook). `DeletionTimestamp.IsZero()` → `reconcileNormal`; otherwise → `reconcileDelete` (remove finalizer, let ownerRef cascade handle VRouterConfig cleanup).
-- **VRouterController**: State machine `Pending → Applying → Applied / Failed`. Failed phase has no auto-retry.
+All controllers follow the same pattern in `Reconcile()`: check `DeletionTimestamp` → `onDelete`; ensure finalizer → `onChange`. Both helpers have signature `(ctx, req, obj) (Result, error)`.
+
+- **BindingController**: `onDelete` removes finalizer (ownerRef cascade handles VRouterConfig GC). `onChange` resolves targets, merges params, renders templates, creates/updates VRouterConfigs, cleans orphans.
+- **VRouterController**: `onChange` runs CheckReady → generation-based apply → poll execPID. `phase` is display-only; `observedGeneration`+`execPID` drive control flow. `Applied` condition enables `kubectl wait`. Failed has no auto-retry.
 
 ### Webhooks
 
