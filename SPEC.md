@@ -122,22 +122,22 @@ metadata:
 spec:
   provider:
     type: kubevirt          # kubevirt (default) | proxmox
-    # --- KubeVirt-specific (optional, defaults to same cluster) ---
-    # kubevirt:
-    #   kubeconfig:
-    #     secretRef:
-    #       name: remote-cluster-kubeconfig
-    #       key: kubeconfig
-    # --- Proxmox VE-specific ---
+    kubevirt:
+      name: vyos-router-a
+      namespace: production
+      # kubeconfig:           # optional, defaults to same cluster
+      #   secretRef:
+      #     name: remote-cluster-kubeconfig
+      #     key: kubeconfig
+    # --- Proxmox VE example ---
+    # type: proxmox
     # proxmox:
+    #   vmid: 100
     #   endpoint: "https://pve.example.com:8006"
     #   credentialsRef:
     #     name: proxmox-credentials    # Secret containing api-token-id + api-token-secret
     #   node: "pve-node-1"             # optional, limit to specific node
     #   insecureSkipTLSVerify: false
-  routerRef:                    # exact name match, single router
-    namespace: production
-    name: vyos-router-a
   params:                 # arbitrary structure (x-kubernetes-preserve-unknown-fields)
     asn: 65001
     routerId: "10.0.0.1"
@@ -157,9 +157,8 @@ spec:
 ```
 
 - `provider.type` defaults to `kubevirt` if omitted
-- For KubeVirt, defaults to the same cluster; optionally specify a remote kubeconfig via Secret
-- For Proxmox, `endpoint` and `credentialsRef` are required
-- `routerRef` uses exact namespace/name matching — one target per router
+- For KubeVirt, `kubevirt.name` identifies the VM; defaults to same cluster; optionally specify a remote kubeconfig via Secret
+- For Proxmox, `proxmox.vmid` identifies the VM; `endpoint` and `credentialsRef` are required
 - `params` uses `x-kubernetes-preserve-unknown-fields: true`; stored as `apiextensionsv1.JSON` in Go
 
 ---
@@ -207,11 +206,11 @@ metadata:
       controller: true
       blockOwnerDeletion: true
 spec:
-  routerRef:
-    name: vyos-router-a
-    namespace: production
-    provider:                       # inherited from VRouterTarget
-      type: kubevirt
+  provider:                         # inherited from VRouterTarget
+    type: kubevirt
+    kubevirt:
+      name: vyos-router-a
+      namespace: production
   save: true              # persist config after commit, default: true
   config: |               # rendered, optional
     protocols {
@@ -353,7 +352,7 @@ Reconcile flow:
 
 1. Lookup `templateRef` → get VRouterTemplate
 2. Lookup each `targetRef` → get VRouterTarget
-3. Read `target.routerRef` — exact namespace/name match for a single router
+3. Read `target.provider` — identify router via provider-specific config (KubeVirt: name/namespace, Proxmox: vmid)
 4. Merge params: `binding.params` → `target.params`
 5. Render template with merged params
 6. Create/update VRouterConfig with:
@@ -370,7 +369,7 @@ Reconcile flow:
 desired := map[string]bool{}
 for _, targetRef := range binding.Spec.TargetRefs {
     target := getTarget(targetRef.Name)
-    configName := fmt.Sprintf("%s.%s", binding.Name, target.Spec.RouterRef.Name)
+    configName := fmt.Sprintf("%s.%s", binding.Name, routerName(target))
     desired[configName] = true
 }
 
@@ -403,7 +402,7 @@ Pending ──→ Applying ──→ Applied
                └──→ Failed
 ```
 
-1. **phase=Pending**: Read `routerRef.provider.type`, instantiate provider, render internal script template, write script via `Provider.WriteFile()`, execute via `Provider.ExecScript()`, save PID to `status.execPID`, set phase → `Applying`, return `RequeueAfter(3s)`
+1. **phase=Pending**: Read `spec.provider.type`, instantiate provider, render internal script template, write script via `Provider.WriteFile()`, execute via `Provider.ExecScript()`, save PID to `status.execPID`, set phase → `Applying`, return `RequeueAfter(3s)`
 2. **phase=Applying**: Check exec status via `Provider.GetExecStatus(status.execPID)`
    - If still running → return `RequeueAfter(3s)`
    - If exited with success → set phase → `Applied`, clear `execPID`, set `lastAppliedTime`
@@ -546,9 +545,7 @@ type VRouterTarget struct {
 }
 
 type VRouterTargetSpec struct {
-    // +optional
-    Provider  ProviderConfig `json:"provider,omitempty"`
-    RouterRef RouterRef      `json:"routerRef"`
+    Provider ProviderConfig `json:"provider"`
     // +kubebuilder:pruning:PreserveUnknownFields
     // +kubebuilder:validation:Schemaless
     // +optional
@@ -595,7 +592,7 @@ type NameRef struct {
 //+kubebuilder:object:root=true
 //+kubebuilder:subresource:status
 //+kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
-//+kubebuilder:printcolumn:name="Router",type=string,JSONPath=`.spec.routerRef.name`
+//+kubebuilder:printcolumn:name="Provider",type=string,JSONPath=`.spec.provider.type`
 //+kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 type VRouterConfig struct {
     metav1.TypeMeta   `json:",inline"`
@@ -605,7 +602,7 @@ type VRouterConfig struct {
 }
 
 type VRouterConfigSpec struct {
-    RouterRef RouterRef `json:"routerRef"`
+    Provider ProviderConfig `json:"provider"`
     // +kubebuilder:default=true
     Save bool `json:"save,omitempty"`
     // +optional
@@ -630,14 +627,6 @@ type VRouterConfigStatus struct {
 ### 9.5 Shared Types
 
 ```go
-type RouterRef struct {
-    Name      string          `json:"name"`
-    // +optional
-    Namespace string          `json:"namespace,omitempty"`
-    // +optional
-    Provider  *ProviderConfig `json:"provider,omitempty"`
-}
-
 // +kubebuilder:validation:Enum=kubevirt;proxmox
 type ProviderType string
 
@@ -648,6 +637,7 @@ const (
 
 type ProviderConfig struct {
     // +kubebuilder:default=kubevirt
+    // +optional
     Type     ProviderType    `json:"type,omitempty"`
     // +optional
     KubeVirt *KubeVirtConfig `json:"kubevirt,omitempty"`
@@ -655,13 +645,8 @@ type ProviderConfig struct {
     Proxmox  *ProxmoxConfig  `json:"proxmox,omitempty"`
 }
 
-type KubeVirtConfig struct {
-    // +optional
-    Kubeconfig *KubeconfigRef `json:"kubeconfig,omitempty"`
-}
-
-type KubeconfigRef struct {
-    SecretRef SecretKeyRef `json:"secretRef"`
+type NameRef struct {
+    Name string `json:"name"`
 }
 
 type SecretKeyRef struct {
@@ -669,7 +654,32 @@ type SecretKeyRef struct {
     Key  string `json:"key"`
 }
 
+type SecretReference struct {
+    Name string `json:"name"`
+}
+```
+
+### 9.6 KubeVirt Types
+
+```go
+type KubeVirtConfig struct {
+    Name string `json:"name"`
+    // +optional
+    Namespace string `json:"namespace,omitempty"`
+    // +optional
+    Kubeconfig *KubeconfigRef `json:"kubeconfig,omitempty"`
+}
+
+type KubeconfigRef struct {
+    SecretRef SecretKeyRef `json:"secretRef"`
+}
+```
+
+### 9.7 Proxmox Types
+
+```go
 type ProxmoxConfig struct {
+    VMID           int             `json:"vmid"`
     Endpoint       string          `json:"endpoint"`
     CredentialsRef SecretReference `json:"credentialsRef"`
     // +optional
@@ -677,10 +687,6 @@ type ProxmoxConfig struct {
     // +kubebuilder:default=false
     // +optional
     InsecureSkipTLSVerify bool `json:"insecureSkipTLSVerify,omitempty"`
-}
-
-type SecretReference struct {
-    Name string `json:"name"`
 }
 ```
 
@@ -690,14 +696,14 @@ type SecretReference struct {
 
 ```
 VRouterTemplate  ←templateRef──  VRouterBinding  ──targetRefs──→  VRouterTarget
-  (template logic)      (combine + common params)                       (provider + routerRef + params)
+  (template logic)      (combine + common params)                       (provider + params)
                                │
                         BindingController
                         render per router
                                │ ownerRef
                                ▼
                           VRouterConfig (per router)
-                          ├── spec.routerRef.provider (from Target)
+                          ├── spec.provider (from Target)
                           ├── spec.config   (rendered config.boot)
                           └── spec.commands (rendered set commands)
                                │
@@ -729,10 +735,10 @@ kind: VRouterConfig
 metadata:
   name: vyos-router-a-config
 spec:
-  routerRef:
-    name: vyos-router-a
-    provider:
-      type: kubevirt        # optional, defaults to kubevirt
+  provider:
+    type: kubevirt            # optional, defaults to kubevirt
+    kubevirt:
+      name: vyos-router-a
   save: true              # optional, defaults to true
   commands: |
     set interfaces ethernet eth0 address 10.0.0.1/24
@@ -746,7 +752,7 @@ spec:
 | Package | Purpose |
 |---------|---------|
 | `k8s.io/client-go` | SPDY exec, Kubernetes API |
-| `kubevirt.io/client-go` | VMI queries (KubeVirt provider) |
+| `kubevirt.io/api` | VMI type definitions (KubeVirt provider) |
 | `k8s.io/apimachinery` | ObjectMeta |
 | `k8s.io/apiextensions-apiserver` | apiextensionsv1.JSON |
 | `github.com/Masterminds/sprig/v3` | Template functions |
