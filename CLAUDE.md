@@ -36,6 +36,8 @@ make deploy IMG=<image>
 
 **Read `SPEC.md` first.** It is the authoritative design document and covers CRD schemas, controller flow, provider abstraction, params merge semantics, template engine, webhook rules, QGA script execution, and RBAC requirements in detail.
 
+**`TODO.md` is the backlog.** Items there are design proposals only — do not implement anything from TODO.md unless explicitly instructed.
+
 ## Architecture
 
 This is a **kubebuilder/operator-sdk** operator (Go module: `github.com/tjjh89017/vrouter-operator`, API group: `vrouter.kojuro.date/v1`). See `SPEC.md §2` for the full architecture diagram.
