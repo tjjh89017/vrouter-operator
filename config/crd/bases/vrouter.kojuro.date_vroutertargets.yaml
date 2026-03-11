@@ -11,6 +11,9 @@ spec:
     kind: VRouterTarget
     listKind: VRouterTargetList
     plural: vroutertargets
+    shortNames:
+    - vrt
+    - vroutertarget
     singular: vroutertarget
   scope: Namespaced
   versions:

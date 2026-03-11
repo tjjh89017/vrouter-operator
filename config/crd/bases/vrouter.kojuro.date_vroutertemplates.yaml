@@ -11,6 +11,9 @@ spec:
     kind: VRouterTemplate
     listKind: VRouterTemplateList
     plural: vroutertemplates
+    shortNames:
+    - vrtt
+    - vroutertemplate
     singular: vroutertemplate
   scope: Namespaced
   versions:

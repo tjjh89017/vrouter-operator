@@ -11,6 +11,9 @@ spec:
     kind: VRouterConfig
     listKind: VRouterConfigList
     plural: vrouterconfigs
+    shortNames:
+    - vrc
+    - vrouterconfig
     singular: vrouterconfig
   scope: Namespaced
   versions:

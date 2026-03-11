@@ -11,6 +11,9 @@ spec:
     kind: VRouterBinding
     listKind: VRouterBindingList
     plural: vrouterbindings
+    shortNames:
+    - vrb
+    - vrouterbinding
     singular: vrouterbinding
   scope: Namespaced
   versions:
