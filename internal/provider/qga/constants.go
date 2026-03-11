@@ -27,8 +27,10 @@ const (
 	CmdFileWrite = `{"execute":"guest-file-write","arguments":{"handle":%d,"buf-b64":%q}}`
 	CmdFileClose = `{"execute":"guest-file-close","arguments":{"handle":%d}}`
 
-	// CmdExecService checks if a named systemd service is active.
-	CmdExecService = `{"execute":"guest-exec","arguments":{"path":"/usr/bin/systemctl","arg":["is-active",%q],"capture-output":true}}`
+	// CmdExecServiceSubState queries the SubState of a systemd service.
+	// The command exits 0 and prints the SubState string (e.g. "exited", "running").
+	// Use this instead of "is-active" to distinguish active(exited) from active(running).
+	CmdExecServiceSubState = `{"execute":"guest-exec","arguments":{"path":"/usr/bin/systemctl","arg":["show","-p","SubState","--value",%q],"capture-output":true}}`
 	// CmdExecScript runs /bin/vbash with the given script path, capturing output.
 	CmdExecScript = `{"execute":"guest-exec","arguments":{"path":"/bin/vbash","arg":[%q],"capture-output":true}}`
 
