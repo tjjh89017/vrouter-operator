@@ -142,6 +142,11 @@ spec:
                 type: string
               message:
                 type: string
+              observedGeneration:
+                description: ObservedGeneration is the generation last successfully
+                  applied.
+                format: int64
+                type: integer
               phase:
                 default: Pending
                 enum:
