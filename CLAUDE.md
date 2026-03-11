@@ -32,6 +32,10 @@ make install
 make deploy IMG=<image>
 ```
 
+## Git
+
+Always use `git commit -s` (DCO sign-off) for all commits.
+
 ## Design spec
 
 **Read `SPEC.md` first.** It is the authoritative design document and covers CRD schemas, controller flow, provider abstraction, params merge semantics, template engine, webhook rules, QGA script execution, and RBAC requirements in detail.
