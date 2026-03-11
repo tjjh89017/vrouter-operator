@@ -31,6 +31,8 @@ type ExecStatus struct {
 // Provider abstracts virtualization backend operations for router management.
 // Each instance is bound to a specific target router at construction time.
 type Provider interface {
+	// IsVMRunning checks whether the underlying VM is in a running (non-stopped) state.
+	IsVMRunning(ctx context.Context) (bool, error)
 	// CheckReady verifies the router is reachable and ready to accept config
 	// (QGA ping + vyos-router.service is-active).
 	CheckReady(ctx context.Context) error

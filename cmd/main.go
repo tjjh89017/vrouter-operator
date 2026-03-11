@@ -37,6 +37,8 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
+	kubevirtv1 "kubevirt.io/api/core/v1"
+
 	vrouterv1 "github.com/tjjh89017/vrouter-operator/api/v1"
 	"github.com/tjjh89017/vrouter-operator/internal/controller"
 	webhookv1 "github.com/tjjh89017/vrouter-operator/internal/webhook/v1"
@@ -50,6 +52,7 @@ var (
 
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
+	utilruntime.Must(kubevirtv1.AddToScheme(scheme))
 
 	utilruntime.Must(vrouterv1.AddToScheme(scheme))
 	// +kubebuilder:scaffold:scheme

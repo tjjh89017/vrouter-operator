@@ -34,6 +34,10 @@ func New(_ *vrouterv1.ProxmoxConfig) (*Provider, error) {
 	return &Provider{}, nil
 }
 
+func (p *Provider) IsVMRunning(_ context.Context) (bool, error) {
+	return false, fmt.Errorf("proxmox provider not yet implemented")
+}
+
 func (p *Provider) CheckReady(_ context.Context) error {
 	return fmt.Errorf("proxmox provider not yet implemented")
 }
