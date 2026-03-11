@@ -29,6 +29,7 @@ type VRouterTemplateSpec struct {
 }
 
 // +kubebuilder:object:root=true
+// +kubebuilder:resource:shortName={vrtt,vroutertemplate}
 
 // VRouterTemplate is the Schema for the vroutertemplates API.
 type VRouterTemplate struct {

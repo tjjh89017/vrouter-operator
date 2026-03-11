@@ -31,6 +31,7 @@ type VRouterTargetSpec struct {
 }
 
 // +kubebuilder:object:root=true
+// +kubebuilder:resource:shortName={vrt,vroutertarget}
 
 // VRouterTarget is the Schema for the vroutertargets API.
 type VRouterTarget struct {

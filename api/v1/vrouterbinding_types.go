@@ -41,6 +41,7 @@ type VRouterBindingStatus struct {
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
+// +kubebuilder:resource:shortName={vrb,vrouterbinding}
 
 // VRouterBinding is the Schema for the vrouterbindings API.
 type VRouterBinding struct {
