@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -72,9 +73,41 @@ func (r *VRouterBindingReconciler) onDelete(ctx context.Context, _ ctrl.Request,
 	return ctrl.Result{}, r.Update(ctx, binding)
 }
 
-func (r *VRouterBindingReconciler) onChange(ctx context.Context, _ ctrl.Request, binding *vrouterv1.VRouterBinding) (ctrl.Result, error) {
+func (r *VRouterBindingReconciler) onChange(ctx context.Context, _ ctrl.Request, binding *vrouterv1.VRouterBinding) (result ctrl.Result, retErr error) {
 	log := logf.FromContext(ctx)
 
+	defer func() {
+		patch := client.MergeFrom(binding.DeepCopy())
+		if retErr != nil {
+			meta.SetStatusCondition(&binding.Status.Conditions, metav1.Condition{
+				Type:               vrouterv1.ConditionReady,
+				Status:             metav1.ConditionFalse,
+				Reason:             "ReconcileError",
+				Message:            retErr.Error(),
+				ObservedGeneration: binding.Generation,
+			})
+		} else {
+			meta.SetStatusCondition(&binding.Status.Conditions, metav1.Condition{
+				Type:               vrouterv1.ConditionReady,
+				Status:             metav1.ConditionTrue,
+				Reason:             "ReconcileSucceeded",
+				Message:            "All VRouterConfigs reconciled successfully.",
+				ObservedGeneration: binding.Generation,
+			})
+		}
+		if patchErr := r.Status().Patch(ctx, binding, patch); patchErr != nil {
+			log.Error(patchErr, "failed to patch binding status")
+			if retErr == nil {
+				retErr = patchErr
+			}
+		}
+	}()
+
+	return r.syncConfigs(ctx, binding)
+}
+
+func (r *VRouterBindingReconciler) syncConfigs(ctx context.Context, binding *vrouterv1.VRouterBinding) (ctrl.Result, error) {
+	log := logf.FromContext(ctx)
 	// Step 1: get template.
 	var tmpl vrouterv1.VRouterTemplate
 	if err := r.Get(ctx, client.ObjectKey{
@@ -136,9 +169,9 @@ func (r *VRouterBindingReconciler) onChange(ctx context.Context, _ ctrl.Request,
 			return controllerutil.SetControllerReference(binding, cfg, r.Scheme)
 		})
 		if err != nil {
-			return ctrl.Result{}, fmt.Errorf("reconcile VRouterConfig %q: %w", cfgName, err)
+			return ctrl.Result{}, fmt.Errorf("sync VRouterConfig %q: %w", cfgName, err)
 		}
-		log.Info("reconciled VRouterConfig", "name", cfgName)
+		log.Info("synced VRouterConfig", "name", cfgName)
 	}
 
 	// Step 6: orphan cleanup — delete configs owned by this binding but no longer desired.
