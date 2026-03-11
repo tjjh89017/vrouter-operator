@@ -25,7 +25,9 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	vrouterv1 "github.com/tjjh89017/vrouter-operator/api/v1"
 	vrotemplate "github.com/tjjh89017/vrouter-operator/internal/template"
@@ -163,6 +165,45 @@ func (r *VRouterBindingReconciler) onChange(ctx context.Context, _ ctrl.Request,
 func (r *VRouterBindingReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&vrouterv1.VRouterBinding{}).
+		// Re-reconcile bindings when the template they reference changes.
+		Watches(&vrouterv1.VRouterTemplate{}, handler.EnqueueRequestsFromMapFunc(r.bindingsForTemplate)).
+		// Re-reconcile bindings when a target they reference changes.
+		Watches(&vrouterv1.VRouterTarget{}, handler.EnqueueRequestsFromMapFunc(r.bindingsForTarget)).
 		Named("vrouterbinding").
 		Complete(r)
+}
+
+// bindingsForTemplate returns reconcile requests for all VRouterBindings that
+// reference the given VRouterTemplate.
+func (r *VRouterBindingReconciler) bindingsForTemplate(ctx context.Context, obj client.Object) []reconcile.Request {
+	var list vrouterv1.VRouterBindingList
+	if err := r.List(ctx, &list, client.InNamespace(obj.GetNamespace())); err != nil {
+		return nil
+	}
+	var reqs []reconcile.Request
+	for i := range list.Items {
+		if list.Items[i].Spec.TemplateRef.Name == obj.GetName() {
+			reqs = append(reqs, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(&list.Items[i])})
+		}
+	}
+	return reqs
+}
+
+// bindingsForTarget returns reconcile requests for all VRouterBindings that
+// reference the given VRouterTarget.
+func (r *VRouterBindingReconciler) bindingsForTarget(ctx context.Context, obj client.Object) []reconcile.Request {
+	var list vrouterv1.VRouterBindingList
+	if err := r.List(ctx, &list, client.InNamespace(obj.GetNamespace())); err != nil {
+		return nil
+	}
+	var reqs []reconcile.Request
+	for i := range list.Items {
+		for _, ref := range list.Items[i].Spec.TargetRefs {
+			if ref.Name == obj.GetName() {
+				reqs = append(reqs, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(&list.Items[i])})
+				break
+			}
+		}
+	}
+	return reqs
 }

@@ -48,8 +48,6 @@ rules:
   resources:
   - vrouterbindings/finalizers
   - vrouterconfigs/finalizers
-  - vroutertargets/finalizers
-  - vroutertemplates/finalizers
   verbs:
   - update
 - apiGroups:
@@ -57,8 +55,6 @@ rules:
   resources:
   - vrouterbindings/status
   - vrouterconfigs/status
-  - vroutertargets/status
-  - vroutertemplates/status
   verbs:
   - get
   - patch

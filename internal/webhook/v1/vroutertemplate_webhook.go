@@ -19,7 +19,9 @@ package v1
 import (
 	"context"
 	"fmt"
+	"text/template"
 
+	"github.com/Masterminds/sprig/v3"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -41,8 +43,6 @@ func SetupVRouterTemplateWebhookWithManager(mgr ctrl.Manager) error {
 		Complete()
 }
 
-// TODO(user): EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
-
 // +kubebuilder:webhook:path=/mutate-vrouter-kojuro-date-v1-vroutertemplate,mutating=true,failurePolicy=fail,sideEffects=None,groups=vrouter.kojuro.date,resources=vroutertemplates,verbs=create;update,versions=v1,name=mvroutertemplate-v1.kb.io,admissionReviewVersions=v1
 
 // VRouterTemplateCustomDefaulter struct is responsible for setting default values on the custom resource of the
@@ -50,9 +50,7 @@ func SetupVRouterTemplateWebhookWithManager(mgr ctrl.Manager) error {
 //
 // NOTE: The +kubebuilder:object:generate=false marker prevents controller-gen from generating DeepCopy methods,
 // as it is used only for temporary operations and does not need to be deeply copied.
-type VRouterTemplateCustomDefaulter struct {
-	// TODO(user): Add more fields as needed for defaulting
-}
+type VRouterTemplateCustomDefaulter struct{}
 
 var _ webhook.CustomDefaulter = &VRouterTemplateCustomDefaulter{}
 
@@ -68,9 +66,6 @@ func (d *VRouterTemplateCustomDefaulter) Default(_ context.Context, obj runtime.
 	return nil
 }
 
-// TODO(user): change verbs to "verbs=create;update;delete" if you want to enable deletion validation.
-// NOTE: The 'path' attribute must follow a specific pattern and should not be modified directly here.
-// Modifying the path for an invalid path can cause API server errors; failing to locate the webhook.
 // +kubebuilder:webhook:path=/validate-vrouter-kojuro-date-v1-vroutertemplate,mutating=false,failurePolicy=fail,sideEffects=None,groups=vrouter.kojuro.date,resources=vroutertemplates,verbs=create;update,versions=v1,name=vvroutertemplate-v1.kb.io,admissionReviewVersions=v1
 
 // VRouterTemplateCustomValidator struct is responsible for validating the VRouterTemplate resource
@@ -78,41 +73,47 @@ func (d *VRouterTemplateCustomDefaulter) Default(_ context.Context, obj runtime.
 //
 // NOTE: The +kubebuilder:object:generate=false marker prevents controller-gen from generating DeepCopy methods,
 // as this struct is used only for temporary operations and does not need to be deeply copied.
-type VRouterTemplateCustomValidator struct {
-	// TODO(user): Add more fields as needed for validation
-}
+type VRouterTemplateCustomValidator struct{}
 
 var _ webhook.CustomValidator = &VRouterTemplateCustomValidator{}
 
 // ValidateCreate implements webhook.CustomValidator so a webhook will be registered for the type VRouterTemplate.
 func (v *VRouterTemplateCustomValidator) ValidateCreate(_ context.Context, obj runtime.Object) (admission.Warnings, error) {
-	vroutertemplate, ok := obj.(*vrouterv1.VRouterTemplate)
+	tmpl, ok := obj.(*vrouterv1.VRouterTemplate)
 	if !ok {
 		return nil, fmt.Errorf("expected a VRouterTemplate object but got %T", obj)
 	}
-	vroutertemplatelog.Info("Validation for VRouterTemplate upon creation", "name", vroutertemplate.GetName())
-
-	return nil, nil
+	vroutertemplatelog.Info("Validation for VRouterTemplate upon creation", "name", tmpl.GetName())
+	return nil, validateTemplateSpec(tmpl)
 }
 
 // ValidateUpdate implements webhook.CustomValidator so a webhook will be registered for the type VRouterTemplate.
-func (v *VRouterTemplateCustomValidator) ValidateUpdate(_ context.Context, oldObj, newObj runtime.Object) (admission.Warnings, error) {
-	vroutertemplate, ok := newObj.(*vrouterv1.VRouterTemplate)
+func (v *VRouterTemplateCustomValidator) ValidateUpdate(_ context.Context, _ runtime.Object, newObj runtime.Object) (admission.Warnings, error) {
+	tmpl, ok := newObj.(*vrouterv1.VRouterTemplate)
 	if !ok {
 		return nil, fmt.Errorf("expected a VRouterTemplate object for the newObj but got %T", newObj)
 	}
-	vroutertemplatelog.Info("Validation for VRouterTemplate upon update", "name", vroutertemplate.GetName())
-
-	return nil, nil
+	vroutertemplatelog.Info("Validation for VRouterTemplate upon update", "name", tmpl.GetName())
+	return nil, validateTemplateSpec(tmpl)
 }
 
 // ValidateDelete implements webhook.CustomValidator so a webhook will be registered for the type VRouterTemplate.
-func (v *VRouterTemplateCustomValidator) ValidateDelete(_ context.Context, obj runtime.Object) (admission.Warnings, error) {
-	vroutertemplate, ok := obj.(*vrouterv1.VRouterTemplate)
-	if !ok {
-		return nil, fmt.Errorf("expected a VRouterTemplate object but got %T", obj)
-	}
-	vroutertemplatelog.Info("Validation for VRouterTemplate upon deletion", "name", vroutertemplate.GetName())
-
+func (v *VRouterTemplateCustomValidator) ValidateDelete(_ context.Context, _ runtime.Object) (admission.Warnings, error) {
 	return nil, nil
+}
+
+// validateTemplateSpec parses config and commands as Go templates to catch syntax errors early.
+func validateTemplateSpec(tmpl *vrouterv1.VRouterTemplate) error {
+	funcMap := sprig.TxtFuncMap()
+	if tmpl.Spec.Config != "" {
+		if _, err := template.New("config").Funcs(funcMap).Parse(tmpl.Spec.Config); err != nil {
+			return fmt.Errorf("spec.config: invalid template syntax: %w", err)
+		}
+	}
+	if tmpl.Spec.Commands != "" {
+		if _, err := template.New("commands").Funcs(funcMap).Parse(tmpl.Spec.Commands); err != nil {
+			return fmt.Errorf("spec.commands: invalid template syntax: %w", err)
+		}
+	}
+	return nil
 }
