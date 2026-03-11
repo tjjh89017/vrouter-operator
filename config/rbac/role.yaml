@@ -1,0 +1,41 @@
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: manager-role
+rules:
+- apiGroups:
+  - vrouter.kojuro.date
+  resources:
+  - vrouterbindings
+  - vrouterconfigs
+  - vroutertargets
+  - vroutertemplates
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - vrouter.kojuro.date
+  resources:
+  - vrouterbindings/finalizers
+  - vrouterconfigs/finalizers
+  - vroutertargets/finalizers
+  - vroutertemplates/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - vrouter.kojuro.date
+  resources:
+  - vrouterbindings/status
+  - vrouterconfigs/status
+  - vroutertargets/status
+  - vroutertemplates/status
+  verbs:
+  - get
+  - patch
+  - update
