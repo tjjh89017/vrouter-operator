@@ -33,3 +33,7 @@ const (
 // ConditionApplied is the condition type used for kubectl wait support.
 // Status=True when phase=Applied; Status=False when phase=Failed or Applying.
 const ConditionApplied = "Applied"
+
+// ConditionReady is the condition type for VRouterBinding.
+// Status=True when all VRouterConfigs were reconciled successfully; Status=False on any reconcile error.
+const ConditionReady = "Ready"

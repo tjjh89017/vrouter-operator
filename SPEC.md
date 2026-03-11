@@ -361,6 +361,9 @@ else:
    - `vrouter.kojuro.date/target` label → target name (for listing)
    - provider info carried over from VRouterTarget
 7. **Orphan cleanup**: list existing VRouterConfigs by label `vrouter.kojuro.date/binding={name}`, diff against desired set, delete orphans
+8. **Update status condition**: always update `Ready` condition before returning
+   - success → `Ready=True`, reason=`ReconcileSucceeded`
+   - any error → `Ready=False`, reason=`ReconcileError`, message=error string
 
 > **Note on ownerReference**: Uses `controllerutil.SetControllerReference()` with `blockOwnerDeletion: true`. This ensures the binding stays in "Deleting" state (foreground delete) until all dependent VRouterConfigs are cleaned up, making it easier to debug deletion order and verify cleanup completion.
 
@@ -371,6 +374,16 @@ VRouterConfigs are owned by the binding via ownerRef, so K8s GC handles cascade 
 ```go
 controllerutil.RemoveFinalizer(binding, FinalizerName)
 return ctrl.Result{}, r.Update(ctx, binding)
+```
+
+**Condition (for `kubectl wait`):**
+
+| Condition type | Status=True | Status=False |
+|----------------|-------------|--------------|
+| `Ready` | all VRouterConfigs reconciled successfully | any reconcile error |
+
+```bash
+kubectl wait --for=condition=Ready vrouterbinding/mybinding --timeout=60s
 ```
 
 ```go
