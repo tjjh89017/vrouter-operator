@@ -25,14 +25,16 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	k8stypes "k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/kubernetes/scheme"
+	k8sscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/remotecommand"
+	kubevirtv1 "kubevirt.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/tjjh89017/vrouter-operator/internal/provider/qga"
-	"github.com/tjjh89017/vrouter-operator/internal/provider/types"
+	providertypes "github.com/tjjh89017/vrouter-operator/internal/provider/types"
 )
 
 // Provider implements provider.Provider for KubeVirt via SPDY exec into virt-launcher + QGA.
@@ -57,6 +59,22 @@ func New(cl client.Client, restCfg *rest.Config, vmName, namespace string) (*Pro
 		vmName:    vmName,
 		namespace: namespace,
 	}, nil
+}
+
+// IsVMRunning returns true if the VirtualMachineInstance exists and is not in a terminal phase.
+func (p *Provider) IsVMRunning(ctx context.Context) (bool, error) {
+	vmi := &kubevirtv1.VirtualMachineInstance{}
+	if err := p.client.Get(ctx, k8stypes.NamespacedName{Namespace: p.namespace, Name: p.vmName}, vmi); err != nil {
+		if client.IgnoreNotFound(err) == nil {
+			return false, nil // VMI not found = VM is stopped
+		}
+		return false, err
+	}
+	switch vmi.Status.Phase {
+	case kubevirtv1.Succeeded, kubevirtv1.Failed:
+		return false, nil
+	}
+	return true, nil
 }
 
 // CheckReady verifies QGA is responsive and vyos-router.service is active.
@@ -149,7 +167,7 @@ func (p *Provider) ExecScript(ctx context.Context) (int64, error) {
 }
 
 // GetExecStatus polls the result of a previously started script via guest-exec-status.
-func (p *Provider) GetExecStatus(ctx context.Context, pid int64) (*types.ExecStatus, error) {
+func (p *Provider) GetExecStatus(ctx context.Context, pid int64) (*providertypes.ExecStatus, error) {
 	resp, err := p.runQGA(ctx, fmt.Sprintf(qga.CmdExecStatus, pid))
 	if err != nil {
 		return nil, fmt.Errorf("guest-exec-status: %w", err)
@@ -167,7 +185,7 @@ func (p *Provider) GetExecStatus(ctx context.Context, pid int64) (*types.ExecSta
 	}
 	stdout, _ := decodeBase64OrEmpty(result.Return.OutData)
 	stderr, _ := decodeBase64OrEmpty(result.Return.ErrData)
-	return &types.ExecStatus{
+	return &providertypes.ExecStatus{
 		Exited:   result.Return.Exited,
 		ExitCode: result.Return.ExitCode,
 		Stdout:   stdout,
@@ -230,7 +248,7 @@ func (p *Provider) execInPod(ctx context.Context, namespace, podName, container 
 			Command:   command,
 			Stdout:    true,
 			Stderr:    true,
-		}, scheme.ParameterCodec)
+		}, k8sscheme.ParameterCodec)
 
 	exec, err := remotecommand.NewSPDYExecutor(p.restCfg, "POST", req.URL())
 	if err != nil {

@@ -27,11 +27,15 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	k8stypes "k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/rest"
+	kubevirtv1 "kubevirt.io/api/core/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	vrouterv1 "github.com/tjjh89017/vrouter-operator/api/v1"
 	"github.com/tjjh89017/vrouter-operator/internal/provider"
@@ -112,6 +116,16 @@ func (r *VRouterConfigReconciler) onChange(ctx context.Context, _ ctrl.Request, 
 	prov, err := provider.New(cfg.Spec.Provider, r.Client, r.RestConfig)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("build provider: %w", err)
+	}
+
+	// Check whether the VM is running; if stopped, skip reconcile.
+	running, err := prov.IsVMRunning(ctx)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("check VM running: %w", err)
+	}
+	if !running {
+		log.Info("VM is stopped, skipping reconcile")
+		return ctrl.Result{}, nil
 	}
 
 	// Step 1: pre-check — QGA ping + vyos-router.service is-active.
@@ -221,10 +235,42 @@ func (r *VRouterConfigReconciler) applyConfig(ctx context.Context, cfg *vrouterv
 	return ctrl.Result{RequeueAfter: requeueAfter}, nil
 }
 
+// vmiToVRouterConfigs maps a VirtualMachineInstance change event to VRouterConfig reconcile requests.
+func (r *VRouterConfigReconciler) vmiToVRouterConfigs(ctx context.Context, obj client.Object) []reconcile.Request {
+	vmiName := obj.GetName()
+	vmiNS := obj.GetNamespace()
+	var cfgList vrouterv1.VRouterConfigList
+	if err := r.List(ctx, &cfgList); err != nil {
+		return nil
+	}
+	var requests []reconcile.Request
+	for i := range cfgList.Items {
+		cfg := &cfgList.Items[i]
+		if cfg.Spec.Provider.KubeVirt == nil {
+			continue
+		}
+		kv := cfg.Spec.Provider.KubeVirt
+		ns := kv.Namespace
+		if ns == "" {
+			ns = cfg.Namespace
+		}
+		if kv.Name == vmiName && ns == vmiNS {
+			requests = append(requests, reconcile.Request{
+				NamespacedName: k8stypes.NamespacedName{
+					Namespace: cfg.Namespace,
+					Name:      cfg.Name,
+				},
+			})
+		}
+	}
+	return requests
+}
+
 // SetupWithManager sets up the controller with the Manager.
 func (r *VRouterConfigReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&vrouterv1.VRouterConfig{}).
+		Watches(&kubevirtv1.VirtualMachineInstance{}, handler.EnqueueRequestsFromMapFunc(r.vmiToVRouterConfigs)).
 		Named("vrouterconfig").
 		Complete(r)
 }
