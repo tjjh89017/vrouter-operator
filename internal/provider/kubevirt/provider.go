@@ -22,6 +22,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -83,9 +84,9 @@ func (p *Provider) CheckReady(ctx context.Context) error {
 		return fmt.Errorf("QGA not responding: %w", err)
 	}
 
-	resp, err := p.runQGA(ctx, fmt.Sprintf(qga.CmdExecService, qga.VyOSService))
+	resp, err := p.runQGA(ctx, fmt.Sprintf(qga.CmdExecServiceSubState, qga.VyOSService))
 	if err != nil {
-		return fmt.Errorf("service check: %w", err)
+		return fmt.Errorf("service substate check: %w", err)
 	}
 	var execResult struct {
 		Return struct {
@@ -93,27 +94,33 @@ func (p *Provider) CheckReady(ctx context.Context) error {
 		} `json:"return"`
 	}
 	if err := json.Unmarshal([]byte(resp), &execResult); err != nil {
-		return fmt.Errorf("service check parse: %w", err)
+		return fmt.Errorf("service substate check parse: %w", err)
 	}
 
-	// Poll until systemctl exits (completes quickly in practice).
+	// Poll until systemctl show exits (completes quickly in practice).
 	for {
 		statusResp, err := p.runQGA(ctx, fmt.Sprintf(qga.CmdExecStatus, execResult.Return.PID))
 		if err != nil {
-			return fmt.Errorf("service check status: %w", err)
+			return fmt.Errorf("service substate status: %w", err)
 		}
 		var statusResult struct {
 			Return struct {
-				Exited   bool `json:"exited"`
-				ExitCode int  `json:"exitcode"`
+				Exited   bool   `json:"exited"`
+				ExitCode int    `json:"exitcode"`
+				OutData  string `json:"out-data"`
 			} `json:"return"`
 		}
 		if err := json.Unmarshal([]byte(statusResp), &statusResult); err != nil {
-			return fmt.Errorf("service check status parse: %w", err)
+			return fmt.Errorf("service substate status parse: %w", err)
 		}
 		if statusResult.Return.Exited {
 			if statusResult.Return.ExitCode != 0 {
-				return fmt.Errorf("%s is not active (exitCode=%d)", qga.VyOSService, statusResult.Return.ExitCode)
+				return fmt.Errorf("systemctl show failed (exitCode=%d)", statusResult.Return.ExitCode)
+			}
+			substate, _ := decodeBase64OrEmpty(statusResult.Return.OutData)
+			substate = strings.TrimSpace(substate)
+			if substate != "exited" {
+				return fmt.Errorf("%s not ready (substate=%s)", qga.VyOSService, substate)
 			}
 			return nil
 		}
