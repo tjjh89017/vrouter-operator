@@ -42,6 +42,9 @@ type VRouterConfigStatus struct {
 	LastAppliedTime *metav1.Time `json:"lastAppliedTime,omitempty"`
 	// +optional
 	Message string `json:"message,omitempty"`
+	// ObservedGeneration is the generation last successfully applied.
+	// +optional
+	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 }
 
 // +kubebuilder:object:root=true

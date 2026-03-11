@@ -400,24 +400,56 @@ for _, cfg := range existing.Items {
 |------|-------------|
 | Watch | VRouterConfig |
 | Dependency | Provider-specific (KubeVirt: VMI + virt-launcher pod; Proxmox: API endpoint) |
-| Apply | Render internal script template → write file → execute |
-| Status | Pending → Applying → Applied / Failed |
+| Apply | Pre-check → render script → write file → execute → poll |
+| Status | `phase` is display-only; `observedGeneration` + `execPID` drive control flow |
 
-Reconcile flow (state machine):
+**Provider interface** (each instance is bound to one target router, configured at construction):
+
+```go
+type Provider interface {
+    // CheckReady verifies the router is reachable and ready to accept config
+    // (QGA ping + vyos-router.service is-active).
+    CheckReady(ctx context.Context) error
+    // WriteFile writes the rendered apply script to the router via guest agent.
+    // The destination path (/tmp/vrouter-apply.sh) is fixed inside the provider.
+    WriteFile(ctx context.Context, content []byte) error
+    // ExecScript executes the apply script asynchronously, returns PID for tracking.
+    // The script path is fixed inside the provider.
+    ExecScript(ctx context.Context) (pid int64, err error)
+    // GetExecStatus polls the result of a previously started script.
+    GetExecStatus(ctx context.Context, pid int64) (*ExecStatus, error)
+}
+```
+
+**Reconcile flow** (`phase` is display-only; no phase-based branching):
 
 ```
-Pending ──→ Applying ──→ Applied
-               │
-               └──→ Failed
+Every reconcile:
+
+1. CheckReady()
+   → fail → return error (controller requeues with backoff)
+
+2. if generation == observedGeneration:
+     if execPID > 0:
+       GetExecStatus(execPID)
+       → still running → requeue(3s)
+       → exitCode == 0 → clear PID, set phase=Applied, lastAppliedTime=now, return nil
+       → exitCode != 0 → clear PID, set phase=Failed, message=stderr, return nil
+     else:
+       return nil  ← already done for this generation (Applied or Failed)
+
+3. (generation > observedGeneration → new spec to apply)
+   render internal script template
+   WriteFile("/tmp/vrouter-apply.sh", script)
+   pid = ExecScript("/tmp/vrouter-apply.sh")
+   set execPID=pid, observedGeneration=generation, phase=Applying
+   return requeue(3s)
 ```
 
-1. **phase=Pending**: Read `spec.provider.type`, instantiate provider, render internal script template, write script via `Provider.WriteFile()`, execute via `Provider.ExecScript()`, save PID to `status.execPID`, set phase → `Applying`, return `RequeueAfter(3s)`
-2. **phase=Applying**: Check exec status via `Provider.GetExecStatus(status.execPID)`
-   - If still running → return `RequeueAfter(3s)`
-   - If exited with success → set phase → `Applied`, clear `execPID`, set `lastAppliedTime`
-   - If exited with error → set phase → `Failed`, record error in `message`
-3. **phase=Applied**: Compare `spec` hash with last applied hash — if changed, reset to `Pending`
-4. **phase=Failed**: No auto-retry; user must update spec or annotate to trigger re-apply
+**Key semantics:**
+- `generation == observedGeneration` → exec for this spec version has been dispatched (running or finished)
+- `generation > observedGeneration` → new spec available, dispatch exec
+- Failed phase has no auto-retry; user updates spec (increments generation) to re-trigger
 
 ### 7.3 Internal Script Template
 
@@ -630,6 +662,10 @@ type VRouterConfigStatus struct {
     LastAppliedTime *metav1.Time `json:"lastAppliedTime,omitempty"`
     // +optional
     Message string `json:"message,omitempty"`
+    // ObservedGeneration is the generation for which exec was last dispatched.
+    // Used with metadata.generation to detect new spec versions.
+    // +optional
+    ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 }
 ```
 

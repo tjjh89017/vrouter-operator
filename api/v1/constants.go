@@ -21,3 +21,11 @@ const (
 	LabelBinding  = "vrouter.kojuro.date/binding"
 	LabelTarget   = "vrouter.kojuro.date/target"
 )
+
+// VRouterConfig phase constants.
+const (
+	PhasePending  = "Pending"
+	PhaseApplying = "Applying"
+	PhaseApplied  = "Applied"
+	PhaseFailed   = "Failed"
+)
