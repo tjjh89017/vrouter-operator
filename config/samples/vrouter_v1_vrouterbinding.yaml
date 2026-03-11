@@ -4,6 +4,10 @@ metadata:
   labels:
     app.kubernetes.io/name: vrouter-operator
     app.kubernetes.io/managed-by: kustomize
-  name: vrouterbinding-sample
+  name: hostname-binding
+  namespace: default
 spec:
-  # TODO(user): Add fields here
+  templateRef:
+    name: hostname-template
+  targetRefs:
+    - name: vyos-with-operator
