@@ -20,8 +20,11 @@ import (
 	"context"
 	"fmt"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
@@ -36,12 +39,10 @@ var vrouterbindinglog = logf.Log.WithName("vrouterbinding-resource")
 // SetupVRouterBindingWebhookWithManager registers the webhook for VRouterBinding in the manager.
 func SetupVRouterBindingWebhookWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewWebhookManagedBy(mgr).For(&vrouterv1.VRouterBinding{}).
-		WithValidator(&VRouterBindingCustomValidator{}).
+		WithValidator(&VRouterBindingCustomValidator{Client: mgr.GetClient()}).
 		WithDefaulter(&VRouterBindingCustomDefaulter{}).
 		Complete()
 }
-
-// TODO(user): EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
 
 // +kubebuilder:webhook:path=/mutate-vrouter-kojuro-date-v1-vrouterbinding,mutating=true,failurePolicy=fail,sideEffects=None,groups=vrouter.kojuro.date,resources=vrouterbindings,verbs=create;update,versions=v1,name=mvrouterbinding-v1.kb.io,admissionReviewVersions=v1
 
@@ -50,21 +51,17 @@ func SetupVRouterBindingWebhookWithManager(mgr ctrl.Manager) error {
 //
 // NOTE: The +kubebuilder:object:generate=false marker prevents controller-gen from generating DeepCopy methods,
 // as it is used only for temporary operations and does not need to be deeply copied.
-type VRouterBindingCustomDefaulter struct {
-	// TODO(user): Add more fields as needed for defaulting
-}
+type VRouterBindingCustomDefaulter struct{}
 
 var _ webhook.CustomDefaulter = &VRouterBindingCustomDefaulter{}
 
 // Default implements webhook.CustomDefaulter so a webhook will be registered for the Kind VRouterBinding.
 func (d *VRouterBindingCustomDefaulter) Default(_ context.Context, obj runtime.Object) error {
 	vrouterbinding, ok := obj.(*vrouterv1.VRouterBinding)
-
 	if !ok {
 		return fmt.Errorf("expected an VRouterBinding object but got %T", obj)
 	}
 	vrouterbindinglog.Info("Defaulting for VRouterBinding", "name", vrouterbinding.GetName())
-
 	return nil
 }
 
@@ -79,31 +76,29 @@ func (d *VRouterBindingCustomDefaulter) Default(_ context.Context, obj runtime.O
 // NOTE: The +kubebuilder:object:generate=false marker prevents controller-gen from generating DeepCopy methods,
 // as this struct is used only for temporary operations and does not need to be deeply copied.
 type VRouterBindingCustomValidator struct {
-	// TODO(user): Add more fields as needed for validation
+	client.Client
 }
 
 var _ webhook.CustomValidator = &VRouterBindingCustomValidator{}
 
 // ValidateCreate implements webhook.CustomValidator so a webhook will be registered for the type VRouterBinding.
-func (v *VRouterBindingCustomValidator) ValidateCreate(_ context.Context, obj runtime.Object) (admission.Warnings, error) {
+func (v *VRouterBindingCustomValidator) ValidateCreate(ctx context.Context, obj runtime.Object) (admission.Warnings, error) {
 	vrouterbinding, ok := obj.(*vrouterv1.VRouterBinding)
 	if !ok {
 		return nil, fmt.Errorf("expected a VRouterBinding object but got %T", obj)
 	}
 	vrouterbindinglog.Info("Validation for VRouterBinding upon creation", "name", vrouterbinding.GetName())
-
-	return nil, validateBinding(vrouterbinding)
+	return nil, validateBinding(ctx, v.Client, vrouterbinding)
 }
 
 // ValidateUpdate implements webhook.CustomValidator so a webhook will be registered for the type VRouterBinding.
-func (v *VRouterBindingCustomValidator) ValidateUpdate(_ context.Context, oldObj, newObj runtime.Object) (admission.Warnings, error) {
+func (v *VRouterBindingCustomValidator) ValidateUpdate(ctx context.Context, oldObj, newObj runtime.Object) (admission.Warnings, error) {
 	vrouterbinding, ok := newObj.(*vrouterv1.VRouterBinding)
 	if !ok {
 		return nil, fmt.Errorf("expected a VRouterBinding object for the newObj but got %T", newObj)
 	}
 	vrouterbindinglog.Info("Validation for VRouterBinding upon update", "name", vrouterbinding.GetName())
-
-	return nil, validateBinding(vrouterbinding)
+	return nil, validateBinding(ctx, v.Client, vrouterbinding)
 }
 
 // ValidateDelete implements webhook.CustomValidator so a webhook will be registered for the type VRouterBinding.
@@ -113,13 +108,33 @@ func (v *VRouterBindingCustomValidator) ValidateDelete(_ context.Context, obj ru
 		return nil, fmt.Errorf("expected a VRouterBinding object but got %T", obj)
 	}
 	vrouterbindinglog.Info("Validation for VRouterBinding upon deletion", "name", vrouterbinding.GetName())
-
 	return nil, nil
 }
 
-func validateBinding(binding *vrouterv1.VRouterBinding) error {
+func validateBinding(ctx context.Context, cl client.Client, binding *vrouterv1.VRouterBinding) error {
 	if len(binding.Spec.TargetRefs) == 0 {
 		return fmt.Errorf("spec.targetRefs must not be empty")
 	}
+
+	// Verify templateRef exists.
+	var tmpl vrouterv1.VRouterTemplate
+	if err := cl.Get(ctx, types.NamespacedName{Namespace: binding.Namespace, Name: binding.Spec.TemplateRef.Name}, &tmpl); err != nil {
+		if apierrors.IsNotFound(err) {
+			return fmt.Errorf("spec.templateRef %q not found", binding.Spec.TemplateRef.Name)
+		}
+		return fmt.Errorf("get templateRef: %w", err)
+	}
+
+	// Verify each targetRef exists.
+	for _, ref := range binding.Spec.TargetRefs {
+		var target vrouterv1.VRouterTarget
+		if err := cl.Get(ctx, types.NamespacedName{Namespace: binding.Namespace, Name: ref.Name}, &target); err != nil {
+			if apierrors.IsNotFound(err) {
+				return fmt.Errorf("spec.targetRefs %q not found", ref.Name)
+			}
+			return fmt.Errorf("get targetRef %q: %w", ref.Name, err)
+		}
+	}
+
 	return nil
 }
