@@ -202,7 +202,7 @@ func (p *Provider) runQGA(ctx context.Context, agentCmd string) (string, error) 
 // findVirtLauncherPod finds the virt-launcher pod for the configured VM.
 func (p *Provider) findVirtLauncherPod(ctx context.Context) (*corev1.Pod, error) {
 	opts := []client.ListOption{
-		client.MatchingLabels{"kubevirt.io/domain": p.vmName},
+		client.MatchingLabels{"vm.kubevirt.io/name": p.vmName},
 	}
 	if p.namespace != "" {
 		opts = append(opts, client.InNamespace(p.namespace))
