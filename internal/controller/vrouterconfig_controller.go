@@ -130,20 +130,29 @@ func (r *VRouterConfigReconciler) onChange(ctx context.Context, _ ctrl.Request, 
 
 	// Step 1: pre-check — QGA ping + vyos-router.service is-active.
 	if err := prov.CheckReady(ctx); err != nil {
-		log.Info("router not ready", "reason", err.Error())
-		return ctrl.Result{}, fmt.Errorf("router not ready: %w", err)
+		log.Info("router not ready, will retry", "reason", err.Error())
+		// VM may have rebooted; reset phase so we re-apply when it comes back.
+		if cfg.Status.Phase == vrouterv1.PhaseApplied {
+			patch := client.MergeFrom(cfg.DeepCopy())
+			cfg.Status.Phase = vrouterv1.PhasePending
+			if err := r.Status().Patch(ctx, cfg, patch); err != nil {
+				return ctrl.Result{}, err
+			}
+		}
+		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 	}
 
-	// Step 2: if exec already dispatched for this generation, poll its result.
-	if cfg.Generation == cfg.Status.ObservedGeneration {
-		if cfg.Status.ExecPID > 0 {
-			return r.pollExecStatus(ctx, cfg, prov)
-		}
-		// Already done (Applied or Failed) for this generation.
+	// Step 2: check for a running script first.
+	if cfg.Status.ExecPID > 0 {
+		return r.pollExecStatus(ctx, cfg, prov)
+	}
+	// Skip only when this generation is conclusively done (Applied or Failed).
+	if cfg.Generation == cfg.Status.ObservedGeneration &&
+		(cfg.Status.Phase == vrouterv1.PhaseApplied || cfg.Status.Phase == vrouterv1.PhaseFailed) {
 		return ctrl.Result{}, nil
 	}
 
-	// Step 3: new spec — render and apply.
+	// Step 3: phase is Pending or spec changed — render and apply.
 	return r.applyConfig(ctx, cfg, prov)
 }
 
