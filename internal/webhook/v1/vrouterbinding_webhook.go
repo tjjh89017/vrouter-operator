@@ -65,8 +65,6 @@ func (d *VRouterBindingCustomDefaulter) Default(_ context.Context, obj runtime.O
 	}
 	vrouterbindinglog.Info("Defaulting for VRouterBinding", "name", vrouterbinding.GetName())
 
-	// TODO(user): fill in your defaulting logic.
-
 	return nil
 }
 
@@ -94,9 +92,7 @@ func (v *VRouterBindingCustomValidator) ValidateCreate(_ context.Context, obj ru
 	}
 	vrouterbindinglog.Info("Validation for VRouterBinding upon creation", "name", vrouterbinding.GetName())
 
-	// TODO(user): fill in your validation logic upon object creation.
-
-	return nil, nil
+	return nil, validateBinding(vrouterbinding)
 }
 
 // ValidateUpdate implements webhook.CustomValidator so a webhook will be registered for the type VRouterBinding.
@@ -107,20 +103,23 @@ func (v *VRouterBindingCustomValidator) ValidateUpdate(_ context.Context, oldObj
 	}
 	vrouterbindinglog.Info("Validation for VRouterBinding upon update", "name", vrouterbinding.GetName())
 
-	// TODO(user): fill in your validation logic upon object update.
-
-	return nil, nil
+	return nil, validateBinding(vrouterbinding)
 }
 
 // ValidateDelete implements webhook.CustomValidator so a webhook will be registered for the type VRouterBinding.
-func (v *VRouterBindingCustomValidator) ValidateDelete(ctx context.Context, obj runtime.Object) (admission.Warnings, error) {
+func (v *VRouterBindingCustomValidator) ValidateDelete(_ context.Context, obj runtime.Object) (admission.Warnings, error) {
 	vrouterbinding, ok := obj.(*vrouterv1.VRouterBinding)
 	if !ok {
 		return nil, fmt.Errorf("expected a VRouterBinding object but got %T", obj)
 	}
 	vrouterbindinglog.Info("Validation for VRouterBinding upon deletion", "name", vrouterbinding.GetName())
 
-	// TODO(user): fill in your validation logic upon object deletion.
-
 	return nil, nil
+}
+
+func validateBinding(binding *vrouterv1.VRouterBinding) error {
+	if len(binding.Spec.TargetRefs) == 0 {
+		return fmt.Errorf("spec.targetRefs must not be empty")
+	}
+	return nil
 }

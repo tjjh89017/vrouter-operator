@@ -65,8 +65,6 @@ func (d *VRouterTemplateCustomDefaulter) Default(_ context.Context, obj runtime.
 	}
 	vroutertemplatelog.Info("Defaulting for VRouterTemplate", "name", vroutertemplate.GetName())
 
-	// TODO(user): fill in your defaulting logic.
-
 	return nil
 }
 
@@ -94,8 +92,6 @@ func (v *VRouterTemplateCustomValidator) ValidateCreate(_ context.Context, obj r
 	}
 	vroutertemplatelog.Info("Validation for VRouterTemplate upon creation", "name", vroutertemplate.GetName())
 
-	// TODO(user): fill in your validation logic upon object creation.
-
 	return nil, nil
 }
 
@@ -107,20 +103,16 @@ func (v *VRouterTemplateCustomValidator) ValidateUpdate(_ context.Context, oldOb
 	}
 	vroutertemplatelog.Info("Validation for VRouterTemplate upon update", "name", vroutertemplate.GetName())
 
-	// TODO(user): fill in your validation logic upon object update.
-
 	return nil, nil
 }
 
 // ValidateDelete implements webhook.CustomValidator so a webhook will be registered for the type VRouterTemplate.
-func (v *VRouterTemplateCustomValidator) ValidateDelete(ctx context.Context, obj runtime.Object) (admission.Warnings, error) {
+func (v *VRouterTemplateCustomValidator) ValidateDelete(_ context.Context, obj runtime.Object) (admission.Warnings, error) {
 	vroutertemplate, ok := obj.(*vrouterv1.VRouterTemplate)
 	if !ok {
 		return nil, fmt.Errorf("expected a VRouterTemplate object but got %T", obj)
 	}
 	vroutertemplatelog.Info("Validation for VRouterTemplate upon deletion", "name", vroutertemplate.GetName())
-
-	// TODO(user): fill in your validation logic upon object deletion.
 
 	return nil, nil
 }
