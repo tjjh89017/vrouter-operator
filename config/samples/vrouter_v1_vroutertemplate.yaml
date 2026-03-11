@@ -4,6 +4,8 @@ metadata:
   labels:
     app.kubernetes.io/name: vrouter-operator
     app.kubernetes.io/managed-by: kustomize
-  name: vroutertemplate-sample
+  name: hostname-template
+  namespace: default
 spec:
-  # TODO(user): Add fields here
+  commands: |
+    set system host-name '{{ .hostname }}'
