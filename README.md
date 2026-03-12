@@ -1,6 +1,6 @@
 # vrouter-operator
 
-A Kubernetes Operator that manages VyOS virtual router configuration running on KubeVirt (and other virtualization backends). Configuration is delivered via QEMU Guest Agent (QGA) over a virtio channel — no network reachability or sidecar injection required.
+A Kubernetes Operator that manages VyOS virtual router configuration running on KubeVirt or Proxmox VE. Configuration is delivered via QEMU Guest Agent (QGA) over a virtio channel — no network reachability or sidecar injection required.
 
 ## Demo
 
@@ -23,12 +23,14 @@ VRouterTemplate  +  VRouterTarget  +  VRouterBinding
                   → create VRouterConfig per target
                           │
                   VRouterController
-                  → wait for VM running (VMI watch)
+                  → wait for VM running
                   → wait for vyos-router.service active (exited)
                   → write rendered script via QGA
                   → execute script via QGA
                   → update status
 ```
+
+### CRDs
 
 | CRD | Short name | Purpose |
 |-----|-----------|---------|
@@ -36,12 +38,15 @@ VRouterTemplate  +  VRouterTarget  +  VRouterBinding
 | `VRouterTarget` | `vrt` | Target VM + provider config + default params |
 | `VRouterBinding` | `vrb` | Binds a template to one or more targets |
 | `VRouterConfig` | `vrc` | Final rendered config applied to one router (auto-generated or direct) |
+| `ProxmoxCluster` | `pxc` | Centralised Proxmox endpoint + credentials (Proxmox provider only) |
 
 ---
 
 ## Prerequisites
 
-- Kubernetes cluster with KubeVirt installed (tested on Harvester)
+- Kubernetes cluster
+  - KubeVirt installed for the `kubevirt` provider (tested on Harvester)
+  - Proxmox VE cluster accessible for the `proxmox` provider
 - cert-manager (for webhook TLS)
 - VyOS VM image with `qemu-guest-agent` installed (no `cloud-init` needed)
 
@@ -93,20 +98,40 @@ spec:
 
 ### 3. Create a VRouterTarget
 
-Point to the KubeVirt VM and provide default params:
+**KubeVirt:**
 
 ```yaml
 apiVersion: vrouter.kojuro.date/v1
 kind: VRouterTarget
 metadata:
-  name: vyos-with-operator
+  name: vyos-kubevirt
   namespace: default
 spec:
   provider:
     type: kubevirt
     kubevirt:
-      name: vyos-with-operator   # VirtualMachine name
+      name: vyos-kubevirt   # VirtualMachine name
       namespace: default
+  params:
+    hostname: "my-vyos-router"
+```
+
+**Proxmox VE** (requires a `ProxmoxCluster`, see below):
+
+```yaml
+apiVersion: vrouter.kojuro.date/v1
+kind: VRouterTarget
+metadata:
+  name: vyos-proxmox
+  namespace: default
+spec:
+  provider:
+    type: proxmox
+    proxmox:
+      vmid: 121
+      clusterRef:
+        name: pve-cluster
+        namespace: default
   params:
     hostname: "my-vyos-router"
 ```
@@ -126,7 +151,7 @@ spec:
     name: hostname-template
   save: true          # persist config after commit (default: true)
   targetRefs:
-    - name: vyos-with-operator
+    - name: vyos-kubevirt
 ```
 
 The operator will automatically create a `VRouterConfig` for each target and apply it to the VM via QGA.
@@ -136,7 +161,62 @@ The operator will automatically create a `VRouterConfig` for each target and app
 ```bash
 kubectl get vrc                  # or: kubectl get vrouterconfig
 kubectl get vrb                  # or: kubectl get vrouterbinding
-kubectl wait vrc/hostname-binding.vyos-with-operator --for=condition=Applied
+kubectl wait vrc/hostname-binding.vyos-kubevirt --for=condition=Applied
+```
+
+---
+
+## Proxmox Provider
+
+The Proxmox provider uses the Proxmox REST API to communicate with VMs via QEMU Guest Agent.
+
+### ProxmoxCluster
+
+`ProxmoxCluster` centralises endpoint and credential configuration for a Proxmox VE cluster. All `VRouterTarget` resources on the same cluster share one `ProxmoxCluster` instead of repeating credentials per target.
+
+The controller polls `/cluster/resources` on `syncInterval` and writes the resolved node name into `VRouterTarget.status.proxmoxNode`, eliminating per-operation node-lookup API calls.
+
+```yaml
+apiVersion: vrouter.kojuro.date/v1
+kind: ProxmoxCluster
+metadata:
+  name: pve-cluster
+  namespace: default
+spec:
+  endpoints:
+    - "https://192.168.1.10:8006"
+  credentialsRef:
+    name: proxmox-credentials   # Secret with api-token-id and api-token-secret
+  insecureSkipTLSVerify: false
+  syncInterval: "60s"
+  checkGuestUptime: false       # set true to detect guest-initiated reboots via QGA
+```
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: proxmox-credentials
+  namespace: default
+stringData:
+  api-token-id: "user@pam!token-name"
+  api-token-secret: "<token-secret>"
+```
+
+### Reboot detection
+
+| Scenario | Detection |
+|----------|-----------|
+| Proxmox stop → start (hard restart) | Proxmox uptime resets → detected automatically |
+| Guest `reboot` command (soft reboot) | Requires `checkGuestUptime: true`; reads `/proc/uptime` via QGA |
+
+When a reboot is detected, `VRouterTarget.status.lastRebootTime` is updated and the `VRouterConfig` controller forces a re-apply on the next reconcile.
+
+### Check sync status
+
+```bash
+kubectl wait --for=condition=Synced proxmoxcluster/pve-cluster --timeout=120s
+kubectl get vrt vyos-proxmox -o jsonpath='{.status.proxmoxNode}'
 ```
 
 ---
@@ -152,16 +232,9 @@ metadata:
   name: my-router-config
   namespace: default
 spec:
-  provider:
-    type: kubevirt
-    kubevirt:
-      name: vyos-with-operator
-      namespace: default
+  targetRef:
+    name: vyos-kubevirt
   save: true
-  config: |
-    system {
-        host-name my-vyos-router
-    }
   commands: |
     set system host-name 'my-vyos-router'
 ```
@@ -200,7 +273,7 @@ kubectl wait vrc/<name> --for=condition=Applied --timeout=120s
 | Provider | Status | Notes |
 |----------|--------|-------|
 | KubeVirt | ✅ Supported | Same-cluster KubeVirt; SPDY exec into virt-launcher pod |
-| Proxmox VE | 🚧 Planned | REST API + QGA; credentials via Secret |
+| Proxmox VE | ✅ Supported | REST API + QGA; credentials via ProxmoxCluster |
 
 ---
 
