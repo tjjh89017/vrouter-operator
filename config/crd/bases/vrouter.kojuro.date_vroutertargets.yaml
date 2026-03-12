@@ -92,20 +92,22 @@ spec:
                         required:
                         - name
                         type: object
-                      endpoint:
-                        description: Proxmox API endpoint URL.
-                        type: string
+                      endpoints:
+                        description: |-
+                          Proxmox API endpoint URLs. Multiple endpoints can be specified for HA clusters;
+                          each request tries them in order until one succeeds.
+                        items:
+                          type: string
+                        type: array
                       insecureSkipTLSVerify:
                         default: false
                         type: boolean
-                      node:
-                        type: string
                       vmid:
                         description: VMID of the virtual machine on Proxmox.
                         type: integer
                     required:
                     - credentialsRef
-                    - endpoint
+                    - endpoints
                     - vmid
                     type: object
                   type:

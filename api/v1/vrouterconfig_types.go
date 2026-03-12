@@ -22,7 +22,8 @@ import (
 
 // VRouterConfigSpec defines the desired state of VRouterConfig.
 type VRouterConfigSpec struct {
-	Provider ProviderConfig `json:"provider"`
+	// TargetRef references the VRouterTarget that describes the provider and router.
+	TargetRef NameRef `json:"targetRef"`
 	// +kubebuilder:default=true
 	Save bool `json:"save,omitempty"`
 	// +optional
@@ -55,7 +56,7 @@ type VRouterConfigStatus struct {
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:shortName={vrc,vrouterconfig}
 // +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
-// +kubebuilder:printcolumn:name="Provider",type=string,JSONPath=`.spec.provider.type`
+// +kubebuilder:printcolumn:name="Target",type=string,JSONPath=`.spec.targetRef.name`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
 // VRouterConfig is the Schema for the vrouterconfigs API.

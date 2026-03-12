@@ -1,0 +1,20 @@
+apiVersion: vrouter.kojuro.date/v1
+kind: VRouterTarget
+metadata:
+  labels:
+    app.kubernetes.io/name: vrouter-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: vyos-proxmox
+  namespace: default
+spec:
+  provider:
+    type: proxmox
+    proxmox:
+      vmid: 121
+      endpoints:
+        - "https://172.30.0.34:8006"
+      credentialsRef:
+        name: proxmox-credentials
+      insecureSkipTLSVerify: true
+  params:
+    hostname: "vyos-proxmox"

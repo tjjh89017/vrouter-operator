@@ -116,7 +116,12 @@ func (r *VRouterConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 func (r *VRouterConfigReconciler) onChange(ctx context.Context, _ ctrl.Request, cfg *vrouterv1.VRouterConfig) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
-	prov, err := provider.New(cfg.Spec.Provider, r.Client, r.RestConfig)
+	var target vrouterv1.VRouterTarget
+	if err := r.Get(ctx, k8stypes.NamespacedName{Name: cfg.Spec.TargetRef.Name, Namespace: cfg.Namespace}, &target); err != nil {
+		return ctrl.Result{}, fmt.Errorf("get target %q: %w", cfg.Spec.TargetRef.Name, err)
+	}
+
+	prov, err := provider.New(ctx, target.Spec.Provider, r.Client, r.RestConfig, target.Namespace)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("build provider: %w", err)
 	}
@@ -258,13 +263,17 @@ func (r *VRouterConfigReconciler) vmiToVRouterConfigs(ctx context.Context, obj c
 	var requests []reconcile.Request
 	for i := range cfgList.Items {
 		cfg := &cfgList.Items[i]
-		if cfg.Spec.Provider.KubeVirt == nil {
+		var target vrouterv1.VRouterTarget
+		if err := r.Get(ctx, k8stypes.NamespacedName{Name: cfg.Spec.TargetRef.Name, Namespace: cfg.Namespace}, &target); err != nil {
 			continue
 		}
-		kv := cfg.Spec.Provider.KubeVirt
+		kv := target.Spec.Provider.KubeVirt
+		if kv == nil {
+			continue
+		}
 		ns := kv.Namespace
 		if ns == "" {
-			ns = cfg.Namespace
+			ns = target.Namespace
 		}
 		if kv.Name == vmiName && ns == vmiNS {
 			requests = append(requests, reconcile.Request{
@@ -278,11 +287,32 @@ func (r *VRouterConfigReconciler) vmiToVRouterConfigs(ctx context.Context, obj c
 	return requests
 }
 
+// configsForTarget maps a VRouterTarget change to reconcile requests for all VRouterConfigs that reference it.
+func (r *VRouterConfigReconciler) configsForTarget(ctx context.Context, obj client.Object) []reconcile.Request {
+	var cfgList vrouterv1.VRouterConfigList
+	if err := r.List(ctx, &cfgList, client.InNamespace(obj.GetNamespace())); err != nil {
+		return nil
+	}
+	var requests []reconcile.Request
+	for i := range cfgList.Items {
+		if cfgList.Items[i].Spec.TargetRef.Name == obj.GetName() {
+			requests = append(requests, reconcile.Request{
+				NamespacedName: k8stypes.NamespacedName{
+					Namespace: cfgList.Items[i].Namespace,
+					Name:      cfgList.Items[i].Name,
+				},
+			})
+		}
+	}
+	return requests
+}
+
 // SetupWithManager sets up the controller with the Manager.
 func (r *VRouterConfigReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&vrouterv1.VRouterConfig{}).
 		Watches(&kubevirtv1.VirtualMachineInstance{}, handler.EnqueueRequestsFromMapFunc(r.vmiToVRouterConfigs)).
+		Watches(&vrouterv1.VRouterTarget{}, handler.EnqueueRequestsFromMapFunc(r.configsForTarget)).
 		Named("vrouterconfig").
 		Complete(r)
 }

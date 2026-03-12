@@ -22,12 +22,11 @@ const ProviderProxmox ProviderType = "proxmox"
 type ProxmoxConfig struct {
 	// VMID of the virtual machine on Proxmox.
 	VMID int `json:"vmid"`
-	// Proxmox API endpoint URL.
-	Endpoint string `json:"endpoint"`
+	// Proxmox API endpoint URLs. Multiple endpoints can be specified for HA clusters;
+	// each request tries them in order until one succeeds.
+	Endpoints []string `json:"endpoints"`
 	// Reference to a Secret containing api-token-id and api-token-secret.
 	CredentialsRef SecretReference `json:"credentialsRef"`
-	// +optional
-	Node string `json:"node,omitempty"`
 	// +kubebuilder:default=false
 	// +optional
 	InsecureSkipTLSVerify bool `json:"insecureSkipTLSVerify,omitempty"`

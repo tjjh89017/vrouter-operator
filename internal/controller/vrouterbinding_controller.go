@@ -154,10 +154,10 @@ func (r *VRouterBindingReconciler) onChange(ctx context.Context, _ ctrl.Request,
 			cfg.Labels[vrouterv1.LabelBinding] = binding.Name
 			cfg.Labels[vrouterv1.LabelTarget] = ref.Name
 			cfg.Spec = vrouterv1.VRouterConfigSpec{
-				Provider: target.Spec.Provider,
-				Save:     binding.Spec.Save,
-				Config:   renderedConfig,
-				Commands: renderedCommands,
+				TargetRef: vrouterv1.NameRef{Name: ref.Name},
+				Save:      binding.Spec.Save,
+				Config:    renderedConfig,
+				Commands:  renderedCommands,
 			}
 			return controllerutil.SetControllerReference(binding, cfg, r.Scheme)
 		})

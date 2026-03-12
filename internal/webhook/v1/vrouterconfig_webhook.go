@@ -20,8 +20,11 @@ import (
 	"context"
 	"fmt"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
@@ -36,7 +39,7 @@ var vrouterconfiglog = logf.Log.WithName("vrouterconfig-resource")
 // SetupVRouterConfigWebhookWithManager registers the webhook for VRouterConfig in the manager.
 func SetupVRouterConfigWebhookWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewWebhookManagedBy(mgr).For(&vrouterv1.VRouterConfig{}).
-		WithValidator(&VRouterConfigCustomValidator{}).
+		WithValidator(&VRouterConfigCustomValidator{Client: mgr.GetClient()}).
 		WithDefaulter(&VRouterConfigCustomDefaulter{}).
 		Complete()
 }
@@ -79,31 +82,40 @@ func (d *VRouterConfigCustomDefaulter) Default(_ context.Context, obj runtime.Ob
 // NOTE: The +kubebuilder:object:generate=false marker prevents controller-gen from generating DeepCopy methods,
 // as this struct is used only for temporary operations and does not need to be deeply copied.
 type VRouterConfigCustomValidator struct {
-	// TODO(user): Add more fields as needed for validation
+	client.Client
 }
 
 var _ webhook.CustomValidator = &VRouterConfigCustomValidator{}
 
 // ValidateCreate implements webhook.CustomValidator so a webhook will be registered for the type VRouterConfig.
-func (v *VRouterConfigCustomValidator) ValidateCreate(_ context.Context, obj runtime.Object) (admission.Warnings, error) {
+func (v *VRouterConfigCustomValidator) ValidateCreate(ctx context.Context, obj runtime.Object) (admission.Warnings, error) {
 	vrouterconfig, ok := obj.(*vrouterv1.VRouterConfig)
 	if !ok {
 		return nil, fmt.Errorf("expected a VRouterConfig object but got %T", obj)
 	}
 	vrouterconfiglog.Info("Validation for VRouterConfig upon creation", "name", vrouterconfig.GetName())
-
-	return nil, validateProviderConfig(vrouterconfig.Spec.Provider)
+	return nil, validateVRouterConfig(ctx, v.Client, vrouterconfig)
 }
 
 // ValidateUpdate implements webhook.CustomValidator so a webhook will be registered for the type VRouterConfig.
-func (v *VRouterConfigCustomValidator) ValidateUpdate(_ context.Context, oldObj, newObj runtime.Object) (admission.Warnings, error) {
+func (v *VRouterConfigCustomValidator) ValidateUpdate(ctx context.Context, oldObj, newObj runtime.Object) (admission.Warnings, error) {
 	vrouterconfig, ok := newObj.(*vrouterv1.VRouterConfig)
 	if !ok {
 		return nil, fmt.Errorf("expected a VRouterConfig object for the newObj but got %T", newObj)
 	}
 	vrouterconfiglog.Info("Validation for VRouterConfig upon update", "name", vrouterconfig.GetName())
+	return nil, validateVRouterConfig(ctx, v.Client, vrouterconfig)
+}
 
-	return nil, validateProviderConfig(vrouterconfig.Spec.Provider)
+func validateVRouterConfig(ctx context.Context, cl client.Client, cfg *vrouterv1.VRouterConfig) error {
+	var target vrouterv1.VRouterTarget
+	if err := cl.Get(ctx, types.NamespacedName{Namespace: cfg.Namespace, Name: cfg.Spec.TargetRef.Name}, &target); err != nil {
+		if apierrors.IsNotFound(err) {
+			return fmt.Errorf("spec.targetRef %q not found", cfg.Spec.TargetRef.Name)
+		}
+		return fmt.Errorf("get targetRef: %w", err)
+	}
+	return nil
 }
 
 // ValidateDelete implements webhook.CustomValidator so a webhook will be registered for the type VRouterConfig.
