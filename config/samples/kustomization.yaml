@@ -4,4 +4,5 @@ resources:
 - vrouter_v1_vroutertarget.yaml
 - vrouter_v1_vrouterbinding.yaml
 - vrouter_v1_vrouterconfig.yaml
+- vrouter_v1_proxmoxcluster.yaml
 # +kubebuilder:scaffold:manifestskustomizesamples

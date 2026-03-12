@@ -11,10 +11,8 @@ spec:
     type: proxmox
     proxmox:
       vmid: 121
-      endpoints:
-        - "https://172.30.0.34:8006"
-      credentialsRef:
-        name: proxmox-credentials
-      insecureSkipTLSVerify: true
+      clusterRef:
+        name: pve-cluster
+        namespace: default
   params:
     hostname: "vyos-proxmox"

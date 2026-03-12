@@ -22,27 +22,50 @@ import (
 	"context"
 	"fmt"
 
+	k8stypes "k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/rest"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+
 	vrouterv1 "github.com/tjjh89017/vrouter-operator/api/v1"
 	"github.com/tjjh89017/vrouter-operator/internal/provider/kubevirt"
 	"github.com/tjjh89017/vrouter-operator/internal/provider/proxmox"
 	"github.com/tjjh89017/vrouter-operator/internal/provider/types"
-	"k8s.io/client-go/rest"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 // Re-export core types so callers only need to import this package.
 type Provider = types.Provider
 type ExecStatus = types.ExecStatus
 
-// New creates a Provider from the given ProviderConfig bound to the described target.
-// namespace is the namespace of the VRouterConfig resource (used to resolve credential Secrets).
-func New(ctx context.Context, cfg vrouterv1.ProviderConfig, cl client.Client, restCfg *rest.Config, namespace string) (Provider, error) {
+// GetProxmoxCluster fetches the ProxmoxCluster referenced by cfg from Kubernetes.
+// If cfg.ClusterRef.Namespace is empty, fallbackNamespace is used.
+func GetProxmoxCluster(ctx context.Context, cfg *vrouterv1.ProxmoxConfig, fallbackNamespace string, cl client.Client) (*vrouterv1.ProxmoxCluster, error) {
+	ref := cfg.ClusterRef
+	ns := ref.Namespace
+	if ns == "" {
+		ns = fallbackNamespace
+	}
+	var cluster vrouterv1.ProxmoxCluster
+	if err := cl.Get(ctx, k8stypes.NamespacedName{Name: ref.Name, Namespace: ns}, &cluster); err != nil {
+		return nil, fmt.Errorf("get ProxmoxCluster %s/%s: %w", ns, ref.Name, err)
+	}
+	return &cluster, nil
+}
+
+// New creates a Provider from the VRouterTarget's ProviderConfig.
+// For the Proxmox provider it fetches the referenced ProxmoxCluster and uses
+// target.Status.ProxmoxNode as the cached node to avoid redundant API calls.
+func New(ctx context.Context, target *vrouterv1.VRouterTarget, cl client.Client, restCfg *rest.Config) (Provider, error) {
+	cfg := target.Spec.Provider
 	switch cfg.Type {
 	case vrouterv1.ProviderProxmox:
 		if cfg.Proxmox == nil {
 			return nil, fmt.Errorf("provider.proxmox must be set when type is proxmox")
 		}
-		return proxmox.New(ctx, cfg.Proxmox, cl, namespace)
+		cluster, err := GetProxmoxCluster(ctx, cfg.Proxmox, target.Namespace, cl)
+		if err != nil {
+			return nil, err
+		}
+		return proxmox.New(ctx, cfg.Proxmox, cluster, target.Status.ProxmoxNode, cl)
 
 	default: // kubevirt (default)
 		if cfg.KubeVirt == nil {

@@ -30,7 +30,21 @@ type VRouterTargetSpec struct {
 	Params apiextensionsv1.JSON `json:"params,omitempty"`
 }
 
+// VRouterTargetStatus defines the observed state of VRouterTarget.
+type VRouterTargetStatus struct {
+	// ProxmoxNode is the Proxmox cluster node currently hosting the VM.
+	// Populated and kept up-to-date by the ProxmoxCluster controller.
+	// +optional
+	ProxmoxNode string `json:"proxmoxNode,omitempty"`
+	// LastRebootTime is set when the ProxmoxCluster controller detects that
+	// the VM uptime is within 1.5× syncInterval (i.e. recently rebooted).
+	// The VRouterConfig controller uses this to force re-apply after a reboot.
+	// +optional
+	LastRebootTime *metav1.Time `json:"lastRebootTime,omitempty"`
+}
+
 // +kubebuilder:object:root=true
+// +kubebuilder:subresource:status
 // +kubebuilder:resource:shortName={vrt,vroutertarget}
 
 // VRouterTarget is the Schema for the vroutertargets API.
@@ -38,7 +52,8 @@ type VRouterTarget struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
-	Spec VRouterTargetSpec `json:"spec,omitempty"`
+	Spec   VRouterTargetSpec   `json:"spec,omitempty"`
+	Status VRouterTargetStatus `json:"status,omitempty"`
 }
 
 // +kubebuilder:object:root=true

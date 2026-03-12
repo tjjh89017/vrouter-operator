@@ -46,27 +46,30 @@ type Provider struct {
 	tokenID     string
 	tokenSecret string
 	vmid        int
+	cachedNode  string
 }
 
 // New creates a Proxmox provider bound to the given VM.
-// It reads API credentials from the Kubernetes Secret named by cfg.CredentialsRef.
-// The Secret must have keys "api-token-id" and "api-token-secret".
-func New(ctx context.Context, cfg *vrouterv1.ProxmoxConfig, cl client.Client, namespace string) (*Provider, error) {
+// It reads API credentials from the Kubernetes Secret named by cluster.Spec.CredentialsRef.
+// cachedNode is the pre-resolved node from VRouterTarget.Status.ProxmoxNode; pass "" to
+// force a live lookup via /cluster/resources on the first operation.
+func New(ctx context.Context, cfg *vrouterv1.ProxmoxConfig, cluster *vrouterv1.ProxmoxCluster, cachedNode string, cl client.Client) (*Provider, error) {
 	secret := &corev1.Secret{}
-	if err := cl.Get(ctx, k8stypes.NamespacedName{Name: cfg.CredentialsRef.Name, Namespace: namespace}, secret); err != nil {
-		return nil, fmt.Errorf("read credentials secret %q: %w", cfg.CredentialsRef.Name, err)
+	secretNS := cluster.Namespace
+	if err := cl.Get(ctx, k8stypes.NamespacedName{Name: cluster.Spec.CredentialsRef.Name, Namespace: secretNS}, secret); err != nil {
+		return nil, fmt.Errorf("read credentials secret %q: %w", cluster.Spec.CredentialsRef.Name, err)
 	}
 	tokenID := strings.TrimSpace(string(secret.Data["api-token-id"]))
 	tokenSecret := strings.TrimSpace(string(secret.Data["api-token-secret"]))
 	if tokenID == "" || tokenSecret == "" {
-		return nil, fmt.Errorf("secret %q must contain api-token-id and api-token-secret keys", cfg.CredentialsRef.Name)
+		return nil, fmt.Errorf("secret %q must contain api-token-id and api-token-secret keys", cluster.Spec.CredentialsRef.Name)
 	}
 
 	transport := http.DefaultTransport.(*http.Transport).Clone()
-	transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: cfg.InsecureSkipTLSVerify} //nolint:gosec
+	transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: cluster.Spec.InsecureSkipTLSVerify} //nolint:gosec
 
-	endpoints := make([]string, len(cfg.Endpoints))
-	for i, e := range cfg.Endpoints {
+	endpoints := make([]string, len(cluster.Spec.Endpoints))
+	for i, e := range cluster.Spec.Endpoints {
 		endpoints[i] = strings.TrimRight(e, "/")
 	}
 	return &Provider{
@@ -75,6 +78,7 @@ func New(ctx context.Context, cfg *vrouterv1.ProxmoxConfig, cl client.Client, na
 		tokenID:     tokenID,
 		tokenSecret: tokenSecret,
 		vmid:        cfg.VMID,
+		cachedNode:  cachedNode,
 	}, nil
 }
 
@@ -144,8 +148,12 @@ func (p *Provider) post(ctx context.Context, path string, payload []byte) ([]byt
 	return body, nil
 }
 
-// resolveNode discovers which Proxmox node hosts the VM via the cluster resources API.
+// resolveNode discovers which Proxmox node hosts the VM.
+// If cachedNode is set it is returned immediately without an API call.
 func (p *Provider) resolveNode(ctx context.Context) (string, error) {
+	if p.cachedNode != "" {
+		return p.cachedNode, nil
+	}
 	body, err := p.get(ctx, "/api2/json/cluster/resources?type=vm")
 	if err != nil {
 		return "", fmt.Errorf("cluster resources: %w", err)

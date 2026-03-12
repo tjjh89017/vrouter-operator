@@ -121,7 +121,7 @@ func (r *VRouterConfigReconciler) onChange(ctx context.Context, _ ctrl.Request, 
 		return ctrl.Result{}, fmt.Errorf("get target %q: %w", cfg.Spec.TargetRef.Name, err)
 	}
 
-	prov, err := provider.New(ctx, target.Spec.Provider, r.Client, r.RestConfig, target.Namespace)
+	prov, err := provider.New(ctx, &target, r.Client, r.RestConfig)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("build provider: %w", err)
 	}
@@ -154,8 +154,18 @@ func (r *VRouterConfigReconciler) onChange(ctx context.Context, _ ctrl.Request, 
 	if cfg.Status.ExecPID > 0 {
 		return r.pollExecStatus(ctx, cfg, prov)
 	}
+
+	// If the VM was rebooted after the last apply, force re-apply by resetting
+	// observedGeneration so the generation check below triggers the apply path.
+	effectiveObservedGen := cfg.Status.ObservedGeneration
+	if target.Status.LastRebootTime != nil {
+		if cfg.Status.LastAppliedTime == nil || cfg.Status.LastAppliedTime.Before(target.Status.LastRebootTime) {
+			effectiveObservedGen = 0
+		}
+	}
+
 	// Skip only when this generation is conclusively done (Applied or Failed).
-	if cfg.Generation == cfg.Status.ObservedGeneration &&
+	if cfg.Generation == effectiveObservedGen &&
 		(cfg.Status.Phase == vrouterv1.PhaseApplied || cfg.Status.Phase == vrouterv1.PhaseFailed) {
 		return ctrl.Result{}, nil
 	}

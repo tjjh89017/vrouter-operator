@@ -21,6 +21,12 @@ type NameRef struct {
 	Name string `json:"name"`
 }
 
+// NamespacedRef is a reference to a resource by name and namespace.
+type NamespacedRef struct {
+	Name      string `json:"name"`
+	Namespace string `json:"namespace"`
+}
+
 // ProviderType specifies the virtualization backend.
 // +kubebuilder:validation:Enum=kubevirt;proxmox
 type ProviderType string

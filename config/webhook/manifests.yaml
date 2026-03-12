@@ -10,6 +10,26 @@ webhooks:
     service:
       name: webhook-service
       namespace: system
+      path: /mutate-vrouter-kojuro-date-v1-proxmoxcluster
+  failurePolicy: Fail
+  name: mproxmoxcluster-v1.kb.io
+  rules:
+  - apiGroups:
+    - vrouter.kojuro.date
+    apiVersions:
+    - v1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - proxmoxclusters
+  sideEffects: None
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
       path: /mutate-vrouter-kojuro-date-v1-vrouterbinding
   failurePolicy: Fail
   name: mvrouterbinding-v1.kb.io
@@ -90,6 +110,26 @@ kind: ValidatingWebhookConfiguration
 metadata:
   name: validating-webhook-configuration
 webhooks:
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
+      path: /validate-vrouter-kojuro-date-v1-proxmoxcluster
+  failurePolicy: Fail
+  name: vproxmoxcluster-v1.kb.io
+  rules:
+  - apiGroups:
+    - vrouter.kojuro.date
+    apiVersions:
+    - v1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - proxmoxclusters
+  sideEffects: None
 - admissionReviewVersions:
   - v1
   clientConfig:

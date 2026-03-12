@@ -121,6 +121,9 @@ var _ = BeforeSuite(func() {
 	err = SetupVRouterConfigWebhookWithManager(mgr)
 	Expect(err).NotTo(HaveOccurred())
 
+	err = SetupProxmoxClusterWebhookWithManager(mgr)
+	Expect(err).NotTo(HaveOccurred())
+
 	// +kubebuilder:scaffold:webhook
 
 	go func() {

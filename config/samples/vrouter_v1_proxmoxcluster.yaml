@@ -1,0 +1,15 @@
+apiVersion: vrouter.kojuro.date/v1
+kind: ProxmoxCluster
+metadata:
+  labels:
+    app.kubernetes.io/name: vrouter-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: pve-cluster
+  namespace: default
+spec:
+  endpoints:
+    - "https://172.30.0.34:8006"
+  credentialsRef:
+    name: proxmox-credentials
+  insecureSkipTLSVerify: true
+  syncInterval: "60s"

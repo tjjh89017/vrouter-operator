@@ -30,7 +30,7 @@ import (
 	vrouterv1 "github.com/tjjh89017/vrouter-operator/api/v1"
 )
 
-var _ = Describe("VRouterBinding Controller", func() {
+var _ = Describe("ProxmoxCluster Controller", func() {
 	Context("When reconciling a resource", func() {
 		const resourceName = "test-resource"
 
@@ -40,20 +40,20 @@ var _ = Describe("VRouterBinding Controller", func() {
 			Name:      resourceName,
 			Namespace: "default", // TODO(user):Modify as needed
 		}
-		vrouterbinding := &vrouterv1.VRouterBinding{}
+		proxmoxcluster := &vrouterv1.ProxmoxCluster{}
 
 		BeforeEach(func() {
-			By("creating the custom resource for the Kind VRouterBinding")
-			err := k8sClient.Get(ctx, typeNamespacedName, vrouterbinding)
+			By("creating the custom resource for the Kind ProxmoxCluster")
+			err := k8sClient.Get(ctx, typeNamespacedName, proxmoxcluster)
 			if err != nil && errors.IsNotFound(err) {
-				resource := &vrouterv1.VRouterBinding{
+				resource := &vrouterv1.ProxmoxCluster{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      resourceName,
 						Namespace: "default",
 					},
-					Spec: vrouterv1.VRouterBindingSpec{
-						TemplateRef: vrouterv1.NameRef{Name: "test-template"},
-						TargetRefs:  []vrouterv1.NameRef{{Name: "test-target"}},
+					Spec: vrouterv1.ProxmoxClusterSpec{
+						Endpoints:      []string{"https://pve.example.com:8006"},
+						CredentialsRef: vrouterv1.SecretReference{Name: "pve-credentials"},
 					},
 				}
 				Expect(k8sClient.Create(ctx, resource)).To(Succeed())
@@ -62,16 +62,16 @@ var _ = Describe("VRouterBinding Controller", func() {
 
 		AfterEach(func() {
 			// TODO(user): Cleanup logic after each test, like removing the resource instance.
-			resource := &vrouterv1.VRouterBinding{}
+			resource := &vrouterv1.ProxmoxCluster{}
 			err := k8sClient.Get(ctx, typeNamespacedName, resource)
 			Expect(err).NotTo(HaveOccurred())
 
-			By("Cleanup the specific resource instance VRouterBinding")
+			By("Cleanup the specific resource instance ProxmoxCluster")
 			Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
 		})
 		It("should successfully reconcile the resource", func() {
 			By("Reconciling the created resource")
-			controllerReconciler := &VRouterBindingReconciler{
+			controllerReconciler := &ProxmoxClusterReconciler{
 				Client: k8sClient,
 				Scheme: k8sClient.Scheme(),
 			}

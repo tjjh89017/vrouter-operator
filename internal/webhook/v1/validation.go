@@ -34,6 +34,9 @@ func validateProviderConfig(provider vrouterv1.ProviderConfig) error {
 		if provider.Proxmox == nil {
 			return fmt.Errorf("provider.proxmox must be set when type is proxmox")
 		}
+		if provider.Proxmox.ClusterRef.Name == "" {
+			return fmt.Errorf("provider.proxmox.clusterRef.name must be set")
+		}
 	default:
 		return fmt.Errorf("unknown provider type: %s", provider.Type)
 	}

@@ -6,6 +6,7 @@ resources:
 - bases/vrouter.kojuro.date_vroutertargets.yaml
 - bases/vrouter.kojuro.date_vrouterbindings.yaml
 - bases/vrouter.kojuro.date_vrouterconfigs.yaml
+- bases/vrouter.kojuro.date_proxmoxclusters.yaml
 # +kubebuilder:scaffold:crdkustomizeresource
 
 patches:
