@@ -228,7 +228,7 @@ func (r *ProxmoxClusterReconciler) fetchClusterResources(ctx context.Context, cl
 			continue
 		}
 		body, err := io.ReadAll(resp.Body)
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		if err != nil {
 			lastErr = err
 			continue
@@ -285,7 +285,7 @@ func (r *ProxmoxClusterReconciler) fetchGuestUptime(ctx context.Context, cluster
 			continue
 		}
 		body, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 			lastErr = fmt.Errorf("HTTP %d: %s", resp.StatusCode, bytes.TrimSpace(body))
 			continue
@@ -322,7 +322,7 @@ func (r *ProxmoxClusterReconciler) fetchGuestUptime(ctx context.Context, cluster
 				continue
 			}
 			body, _ := io.ReadAll(resp.Body)
-			resp.Body.Close()
+			_ = resp.Body.Close()
 			if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 				continue
 			}
@@ -340,7 +340,7 @@ func (r *ProxmoxClusterReconciler) fetchGuestUptime(ctx context.Context, cluster
 			}
 			// /proc/uptime format: "12345.67 23456.78"
 			var uptime float64
-			fmt.Sscanf(statusResult.Data.OutData, "%f", &uptime)
+			_, _ = fmt.Sscanf(statusResult.Data.OutData, "%f", &uptime)
 			return uptime, nil
 		}
 		select {
