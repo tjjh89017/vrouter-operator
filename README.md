@@ -15,19 +15,22 @@ Full guide: https://hackmd.io/@TJibejKyT3OH1YR5f1duzg/ryMdLbvigx
 ## How It Works
 
 ```
-VRouterTemplate  +  VRouterTarget  +  VRouterBinding
-                          │
-                  BindingController
-                  → merge params (binding → target)
-                  → render template
-                  → create VRouterConfig per target
-                          │
-                  VRouterController
-                  → wait for VM running
-                  → wait for vyos-router.service active (exited)
-                  → write rendered script via QGA
-                  → execute script via QGA
-                  → update status
+ProxmoxCluster ──clusterRef──→ VRouterTarget ←──── VRouterBinding ──── VRouterTemplate
+(endpoints +                   (provider +          (bind template       (config/commands
+ credentials)                   params)              to targets)          template text)
+      │                              │
+ProxmoxCluster                BindingController
+Controller                    → merge params (binding → target)
+(polls node,                  → render template
+ reboot detect)               → create VRouterConfig per target (targetRef → VRouterTarget)
+      │                              │
+      └─ status.proxmoxNode   VRouterController
+         status.lastRebootTime → resolve VRouterTarget (provider info)
+                              → wait for VM running
+                              → wait for vyos-router.service active
+                              → write rendered script via QGA
+                              → execute script via QGA
+                              → update status (phase, conditions)
 ```
 
 ### CRDs
@@ -68,7 +71,19 @@ packages = ["qemu-guest-agent"]
 
 ## Installation
 
-> 🚧 Under Construction — release packaging in progress.
+### Helm (recommended)
+
+```bash
+helm install vrouter-operator ./charts/vrouter-operator \
+  --namespace vrouter-system --create-namespace
+```
+
+### Kustomize / raw manifests
+
+```bash
+make install          # install CRDs into current cluster
+make deploy IMG=<your-image>
+```
 
 ---
 
@@ -77,8 +92,8 @@ packages = ["qemu-guest-agent"]
 ### 1. Install the operator
 
 ```bash
-make install   # install CRDs into current cluster
-make deploy IMG=<your-image>
+helm install vrouter-operator ./charts/vrouter-operator \
+  --namespace vrouter-system --create-namespace
 ```
 
 ### 2. Create a VRouterTemplate
