@@ -170,7 +170,7 @@ func (r *ProxmoxClusterReconciler) onChange(ctx context.Context, _ ctrl.Request,
 		if cluster.Spec.CheckGuestUptime && info.node != "" {
 			guestUptime, err := r.fetchGuestUptime(ctx, cluster, info.node, px.VMID, tokenID, tokenSecret)
 			if err != nil {
-				log.Error(err, "fetch guest uptime", "target", t.Name)
+				log.Info("fetch guest uptime skipped", "target", t.Name, "reason", err.Error())
 			} else if guestUptime > 0 && guestUptime <= threshold {
 				t.Status.LastRebootTime = &now
 				changed = true
