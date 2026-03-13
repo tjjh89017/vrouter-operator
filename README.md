@@ -83,13 +83,6 @@ packages = ["qemu-guest-agent"]
 ### Helm (recommended)
 
 ```bash
-helm install vrouter-operator oci://ghcr.io/tjjh89017/charts/vrouter-operator \
-  --namespace vrouter-system --create-namespace
-```
-
-Or install from the local chart:
-
-```bash
 helm install vrouter-operator ./charts/vrouter-operator \
   --namespace vrouter-system --create-namespace
 ```
