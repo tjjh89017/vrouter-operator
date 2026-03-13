@@ -125,7 +125,9 @@ helm uninstall vrouter-operator --namespace vrouter-system
 
 ```bash
 make install          # install CRDs into current cluster
-make deploy IMG=<your-image>
+make deploy           # deploys ghcr.io/tjjh89017/vrouter-operator:latest by default
+# or pin a version:
+make deploy IMG=ghcr.io/tjjh89017/vrouter-operator:v0.1.0
 ```
 
 ---

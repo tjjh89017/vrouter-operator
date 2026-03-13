@@ -11,7 +11,7 @@ controllerManager:
         drop:
         - ALL
     image:
-      repository: tjjh89017/vrouter-operator
+      repository: ghcr.io/tjjh89017/vrouter-operator
       tag: latest
     resources:
       limits:
