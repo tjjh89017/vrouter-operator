@@ -32,6 +32,7 @@ rules:
 - apiGroups:
   - vrouter.kojuro.date
   resources:
+  - proxmoxclusters
   - vrouterbindings
   - vrouterconfigs
   - vroutertargets
@@ -47,6 +48,7 @@ rules:
 - apiGroups:
   - vrouter.kojuro.date
   resources:
+  - proxmoxclusters/finalizers
   - vrouterbindings/finalizers
   - vrouterconfigs/finalizers
   verbs:
@@ -54,8 +56,10 @@ rules:
 - apiGroups:
   - vrouter.kojuro.date
   resources:
+  - proxmoxclusters/status
   - vrouterbindings/status
   - vrouterconfigs/status
+  - vroutertargets/status
   verbs:
   - get
   - patch

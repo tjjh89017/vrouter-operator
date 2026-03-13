@@ -84,29 +84,24 @@ spec:
                     description: ProxmoxConfig holds Proxmox VE provider configuration
                       and router identification.
                     properties:
-                      credentialsRef:
-                        description: Reference to a Secret containing api-token-id and
-                          api-token-secret.
+                      clusterRef:
+                        description: |-
+                          ClusterRef references a ProxmoxCluster resource that holds endpoint and credentials.
+                          Namespace may be omitted to use the same namespace as the VRouterTarget.
                         properties:
                           name:
                             type: string
+                          namespace:
+                            type: string
                         required:
                         - name
+                        - namespace
                         type: object
-                      endpoint:
-                        description: Proxmox API endpoint URL.
-                        type: string
-                      insecureSkipTLSVerify:
-                        default: false
-                        type: boolean
-                      node:
-                        type: string
                       vmid:
                         description: VMID of the virtual machine on Proxmox.
                         type: integer
                     required:
-                    - credentialsRef
-                    - endpoint
+                    - clusterRef
                     - vmid
                     type: object
                   type:
@@ -120,9 +115,27 @@ spec:
             required:
             - provider
             type: object
+          status:
+            description: VRouterTargetStatus defines the observed state of VRouterTarget.
+            properties:
+              lastRebootTime:
+                description: |-
+                  LastRebootTime is set when the ProxmoxCluster controller detects that
+                  the VM uptime is within 1.5× syncInterval (i.e. recently rebooted).
+                  The VRouterConfig controller uses this to force re-apply after a reboot.
+                format: date-time
+                type: string
+              proxmoxNode:
+                description: |-
+                  ProxmoxNode is the Proxmox cluster node currently hosting the VM.
+                  Populated and kept up-to-date by the ProxmoxCluster controller.
+                type: string
+            type: object
         type: object
     served: true
     storage: true
+    subresources:
+      status: {}
 status:
   acceptedNames:
     kind: ""

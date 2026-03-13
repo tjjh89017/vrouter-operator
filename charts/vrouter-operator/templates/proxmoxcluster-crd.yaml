@@ -1,7 +1,7 @@
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
-  name: vrouterconfigs.vrouter.kojuro.date
+  name: proxmoxclusters.vrouter.kojuro.date
   annotations:
     controller-gen.kubebuilder.io/version: v0.18.0
   labels:
@@ -9,29 +9,29 @@ metadata:
 spec:
   group: vrouter.kojuro.date
   names:
-    kind: VRouterConfig
-    listKind: VRouterConfigList
-    plural: vrouterconfigs
+    kind: ProxmoxCluster
+    listKind: ProxmoxClusterList
+    plural: proxmoxclusters
     shortNames:
-    - vrc
-    - vrouterconfig
-    singular: vrouterconfig
+    - pxc
+    - proxmoxcluster
+    singular: proxmoxcluster
   scope: Namespaced
   versions:
   - additionalPrinterColumns:
-    - jsonPath: .status.phase
-      name: Phase
+    - jsonPath: .spec.endpoints[0]
+      name: Endpoint
       type: string
-    - jsonPath: .spec.targetRef.name
-      name: Target
-      type: string
+    - jsonPath: .status.lastSyncTime
+      name: LastSync
+      type: date
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
     name: v1
     schema:
       openAPIV3Schema:
-        description: VRouterConfig is the Schema for the vrouterconfigs API.
+        description: ProxmoxCluster is the Schema for the proxmoxclusters API.
         properties:
           apiVersion:
             description: |-
@@ -51,34 +51,52 @@ spec:
           metadata:
             type: object
           spec:
-            description: VRouterConfigSpec defines the desired state of VRouterConfig.
+            description: ProxmoxClusterSpec defines the desired state of ProxmoxCluster.
             properties:
-              commands:
-                type: string
-              config:
-                type: string
-              save:
-                default: true
+              checkGuestUptime:
+                default: false
+                description: |-
+                  CheckGuestUptime enables guest OS uptime detection via QEMU Guest Agent.
+                  When true, the controller queries /proc/uptime inside each VM during every
+                  sync and sets VRouterTarget.status.lastRebootTime when guest uptime is within
+                  1.5× syncInterval. This detects soft reboots (guest-initiated reboot) that do
+                  not restart the QEMU process and therefore cannot be detected from Proxmox
+                  cluster resource uptime alone.
+                  Requires QEMU Guest Agent to be running in the VM.
                 type: boolean
-              targetRef:
-                description: TargetRef references the VRouterTarget that describes the
-                  provider and router.
+              credentialsRef:
+                description: Reference to a Secret containing api-token-id and api-token-secret.
                 properties:
                   name:
                     type: string
                 required:
                 - name
                 type: object
+              endpoints:
+                description: |-
+                  Proxmox API endpoint URLs. Multiple endpoints can be specified for HA clusters;
+                  each request tries them in order until one succeeds.
+                items:
+                  type: string
+                type: array
+              insecureSkipTLSVerify:
+                default: false
+                type: boolean
+              syncInterval:
+                default: 60s
+                description: |-
+                  SyncInterval controls how often the controller polls /cluster/resources and
+                  updates VRouterTarget.status.proxmoxNode.
+                type: string
             required:
-            - targetRef
+            - credentialsRef
+            - endpoints
             type: object
           status:
-            description: VRouterConfigStatus defines the observed state of VRouterConfig.
+            description: ProxmoxClusterStatus defines the observed state of ProxmoxCluster.
             properties:
               conditions:
-                description: |-
-                  Conditions for kubectl wait support.
-                  The "Applied" condition is True when phase=Applied.
+                description: Conditions represent the current state of the ProxmoxCluster.
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -134,26 +152,10 @@ spec:
                   - type
                   type: object
                 type: array
-              execPID:
-                format: int64
-                type: integer
-              lastAppliedTime:
+              lastSyncTime:
+                description: LastSyncTime is the last time the controller successfully
+                  polled the Proxmox cluster.
                 format: date-time
-                type: string
-              message:
-                type: string
-              observedGeneration:
-                description: ObservedGeneration is the generation for which exec was
-                  last dispatched.
-                format: int64
-                type: integer
-              phase:
-                default: Pending
-                enum:
-                - Pending
-                - Applying
-                - Applied
-                - Failed
                 type: string
             type: object
         type: object

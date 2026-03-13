@@ -1,0 +1,19 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "vrouter-operator.fullname" . }}-proxmoxcluster-admin-role
+  labels:
+  {{- include "vrouter-operator.labels" . | nindent 4 }}
+rules:
+- apiGroups:
+  - vrouter.kojuro.date
+  resources:
+  - proxmoxclusters
+  verbs:
+  - '*'
+- apiGroups:
+  - vrouter.kojuro.date
+  resources:
+  - proxmoxclusters/status
+  verbs:
+  - get

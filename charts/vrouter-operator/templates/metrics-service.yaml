@@ -1,7 +1,7 @@
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ include "vrouter-operator.fullname" . }}-metrics
+  name: {{ include "vrouter-operator.fullname" . }}-controller-manager-metrics-service
   labels:
     control-plane: controller-manager
   {{- include "vrouter-operator.labels" . | nindent 4 }}

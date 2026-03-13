@@ -71,11 +71,54 @@ packages = ["qemu-guest-agent"]
 
 ## Installation
 
+### Prerequisites
+
+- Kubernetes 1.24+
+- [cert-manager](https://cert-manager.io/docs/installation/) installed (required for webhook TLS)
+  ```bash
+  kubectl apply -f https://github.com/cert-manager/cert-manager/releases/latest/download/cert-manager.yaml
+  kubectl wait --for=condition=Available deployment --all -n cert-manager --timeout=120s
+  ```
+
 ### Helm (recommended)
+
+```bash
+helm install vrouter-operator oci://ghcr.io/tjjh89017/charts/vrouter-operator \
+  --namespace vrouter-system --create-namespace
+```
+
+Or install from the local chart:
 
 ```bash
 helm install vrouter-operator ./charts/vrouter-operator \
   --namespace vrouter-system --create-namespace
+```
+
+#### Common values overrides
+
+```bash
+# Pin to a specific image tag
+helm install vrouter-operator ./charts/vrouter-operator \
+  --namespace vrouter-system --create-namespace \
+  --set controllerManager.manager.image.tag=v0.1.0
+
+# Disable webhooks (dev/testing only — no validation)
+helm install vrouter-operator ./charts/vrouter-operator \
+  --namespace vrouter-system --create-namespace \
+  --set controllerManager.manager.args="{--metrics-bind-address=:8443,--leader-elect,--health-probe-bind-address=:8081,--enable-webhooks=false}"
+```
+
+#### Upgrade
+
+```bash
+helm upgrade vrouter-operator ./charts/vrouter-operator \
+  --namespace vrouter-system
+```
+
+#### Uninstall
+
+```bash
+helm uninstall vrouter-operator --namespace vrouter-system
 ```
 
 ### Kustomize / raw manifests
