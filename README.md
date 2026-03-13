@@ -1,4 +1,4 @@
-# vrouter-operator
+# vRouter-Operator
 
 A Kubernetes Operator that manages VyOS virtual router configuration running on KubeVirt or Proxmox VE. Configuration is delivered via QEMU Guest Agent (QGA) over a virtio channel — no network reachability or sidecar injection required.
 
