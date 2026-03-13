@@ -242,7 +242,7 @@ spec:
     name: proxmox-credentials   # Secret with api-token-id and api-token-secret
   insecureSkipTLSVerify: false
   syncInterval: "60s"
-  checkGuestUptime: false       # set true to detect guest-initiated reboots via QGA
+  checkGuestUptime: true        # detect guest-initiated reboots via QGA (default: true)
 ```
 
 ```yaml
@@ -261,7 +261,7 @@ stringData:
 | Scenario | Detection |
 |----------|-----------|
 | Proxmox stop → start (hard restart) | Proxmox uptime resets → detected automatically |
-| Guest `reboot` command (soft reboot) | Requires `checkGuestUptime: true`; reads `/proc/uptime` via QGA |
+| Guest `reboot` command (soft reboot) | Detected via `checkGuestUptime: true` (default); reads `/proc/uptime` via QGA |
 
 When a reboot is detected, `VRouterTarget.status.lastRebootTime` is updated and the `VRouterConfig` controller forces a re-apply on the next reconcile.
 

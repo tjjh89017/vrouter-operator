@@ -42,7 +42,7 @@ type ProxmoxClusterSpec struct {
 	// not restart the QEMU process and therefore cannot be detected from Proxmox
 	// cluster resource uptime alone.
 	// Requires QEMU Guest Agent to be running in the VM.
-	// +kubebuilder:default=false
+	// +kubebuilder:default=true
 	// +optional
 	CheckGuestUptime bool `json:"checkGuestUptime,omitempty"`
 }

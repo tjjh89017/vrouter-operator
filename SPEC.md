@@ -201,7 +201,7 @@ spec:
     name: proxmox-credentials        # Secret containing api-token-id + api-token-secret
   insecureSkipTLSVerify: false
   syncInterval: 60s                  # how often to poll /cluster/resources
-  checkGuestUptime: false            # enable guest-agent uptime check for soft-reboot detection
+  checkGuestUptime: true             # enable guest-agent uptime check for soft-reboot detection (default: true)
 status:
   lastSyncTime: "2026-01-01T00:00:00Z"
   conditions: []

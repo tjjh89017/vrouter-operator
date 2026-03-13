@@ -53,7 +53,7 @@ spec:
             description: ProxmoxClusterSpec defines the desired state of ProxmoxCluster.
             properties:
               checkGuestUptime:
-                default: false
+                default: true
                 description: |-
                   CheckGuestUptime enables guest OS uptime detection via QEMU Guest Agent.
                   When true, the controller queries /proc/uptime inside each VM during every
