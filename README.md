@@ -4,11 +4,9 @@ A Kubernetes Operator that manages VyOS virtual router configuration running on 
 
 ## Demo
 
-YouTube: [https://www.youtube.com/watch?v=pvdPgob3jAE](https://www.youtube.com/watch?v=pvdPgob3jAE)
+YouTube: [https://www.youtube.com/watch?v=RsieH9gFU4I](https://www.youtube.com/watch?v=RsieH9gFU4I)
 
-[![vRouter-Operator-Demo](http://img.youtube.com/vi/pvdPgob3jAE/0.jpg)](https://www.youtube.com/watch?v=pvdPgob3jAE "vRouter-Operator Demo")
-
-Full guide: https://hackmd.io/@TJibejKyT3OH1YR5f1duzg/ryMdLbvigx
+[![vRouter-Operator-Demo](http://img.youtube.com/vi/RsieH9gFU4I/0.jpg)](https://www.youtube.com/watch?v=RsieH9gFU4I "vRouter-Operator Demo")
 
 ---
 
