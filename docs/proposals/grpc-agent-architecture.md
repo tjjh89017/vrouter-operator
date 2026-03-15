@@ -283,6 +283,80 @@ The agent runs on VyOS as a daemon. Separate repository: `vrouter-agent`.
 - **Config apply**: Receives `set` commands, applies via VyOS API
 - **Status report**: Reads interfaces, routes, BGP state; sends periodically or on-change
 
+### Init Config (Connection Safety)
+
+The agent maintains an **init config** — a protected set of configuration that guarantees connectivity back to the controller. This prevents a bad config push from bricking the management channel.
+
+#### What init config protects
+
+Typical examples:
+- Management interface IP / DHCP
+- Default route or static route to reach the controller
+- Firewall rules allowing outbound gRPC (e.g. port 50051)
+- DNS resolver (if controller endpoint is a hostname)
+
+#### How it works
+
+The init config is a file written at agent installation time. The agent accepts a flag or config option to specify its path:
+
+```bash
+vrouter-agent --init-config /config/vrouter-agent/init-config.txt
+```
+
+On VyOS, `/config/` survives image upgrades, so placing init config there ensures persistence. Default path: `/config/vrouter-agent/init-config.txt`.
+
+Example init config:
+
+```
+set interfaces ethernet eth0 address dhcp
+set protocols static route 0.0.0.0/0 next-hop 192.168.1.1
+set firewall name MGMT rule 10 action accept
+set firewall name MGMT rule 10 destination port 50051
+set firewall name MGMT rule 10 protocol tcp
+```
+
+#### Apply with rollback (commit-confirm pattern)
+
+When the agent receives `apply_config`, it does NOT blindly apply. Instead:
+
+```
+1. Save current running config as rollback snapshot
+2. Merge init config + new config (init config wins on conflict)
+3. Apply merged config with commit-confirm timeout (e.g. 60s)
+4. Wait for connectivity check (can we still reach gRPC server?)
+   ├── Yes → confirm commit, send config_ack(success)
+   └── No  → timeout expires → VyOS auto-rollback to snapshot
+             → agent reconnects → send config_ack(failure, "connectivity lost")
+```
+
+VyOS native `commit-confirm` does the heavy lifting — if no `confirm` command is issued within the timeout, VyOS reverts automatically. The agent just needs to verify connectivity before confirming.
+
+#### Init config merge semantics
+
+Init config entries are **always applied on top** of any pushed config. If the pushed config tries to delete or override an init config path, the init config wins:
+
+```
+Pushed config:       delete interfaces ethernet eth0 address
+Init config:         set interfaces ethernet eth0 address dhcp
+
+Result:              set interfaces ethernet eth0 address dhcp  (init wins)
+```
+
+This is enforced client-side by the agent before commit. The gRPC server and controller are unaware of init config — it is purely an agent-local safety mechanism.
+
+#### Config ack reports protection
+
+The `config_ack` message includes which init config paths were enforced, so the controller/user knows what was overridden:
+
+```json
+{
+  "id": "req-123",
+  "success": true,
+  "protected_paths": ["interfaces ethernet eth0 address"],
+  "message": "1 init config path enforced over pushed config"
+}
+```
+
 ## Directory Structure (New Files)
 
 ```
