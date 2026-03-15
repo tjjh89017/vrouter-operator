@@ -357,6 +357,89 @@ The `config_ack` message includes which init config paths were enforced, so the 
 }
 ```
 
+## Future Vision: Generic Network Device Control Plane
+
+> **Status**: Early idea, open for discussion. **NOT in scope for the current proposal.** This section documents the long-term potential of the gRPC design but will NOT be implemented as part of this proposal. The initial implementation focuses solely on VyOS bare metal support.
+
+The gRPC agent + server design is intentionally vendor-agnostic at the transport layer. This opens a path toward controlling **any** network device, not just VyOS.
+
+### Multi-Vendor Architecture
+
+```
+                    ┌──────────────────────────────┐
+                    │  Higher-Level Controller      │
+                    │  (e.g. BGP-EVPN fabric mgr)  │
+                    │                              │
+                    │  Generates abstract intent:   │
+                    │  "spine-leaf BGP-EVPN fabric" │
+                    └──────┬───────────┬───────────┘
+                           │           │
+              vendor-specific config rendering
+                           │           │
+                    ┌──────▼──┐  ┌─────▼──────┐
+                    │ vrouter  │  │  cisco      │
+                    │ operator │  │  operator   │
+                    │          │  │  (future)   │
+                    │ renders  │  │ renders     │
+                    │ VyOS cfg │  │ IOS-XE cfg  │
+                    └────┬─────┘  └─────┬───────┘
+                         │              │
+                    ┌────▼──────────────▼────┐
+                    │   gRPC Server           │
+                    │   (generic, shared)     │
+                    └────┬──────────────┬────┘
+                         │              │
+                    ┌────▼────┐   ┌─────▼────┐
+                    │ VyOS    │   │ Cisco     │
+                    │ agent   │   │ agent     │
+                    └─────────┘   └──────────┘
+```
+
+### Two possible approaches (TBD)
+
+**Approach A: Vendor-specific agents**
+
+Each vendor has its own agent implementation that knows how to apply configs for that platform. The gRPC server and proto stay the same — `apply_config` sends a payload, the agent interprets it according to its vendor.
+
+- VyOS agent: Python, uses `vyos.configsession`
+- Cisco agent: Python, uses NETCONF/RESTCONF
+- Juniper agent: Python, uses PyEZ
+
+The agent implements a common interface with vendor-specific classes:
+
+```python
+class AgentBackend(ABC):
+    @abstractmethod
+    def apply_config(self, payload: bytes) -> ConfigResult: ...
+    @abstractmethod
+    def get_status(self) -> Status: ...
+
+class VyOSBackend(AgentBackend): ...
+class CiscoBackend(AgentBackend): ...
+```
+
+**Approach B: vrouter-operator renders multi-vendor configs**
+
+vrouter-operator itself learns to render configs for different vendors. The agent stays dumb (just pushes text). This keeps agent complexity minimal but makes the operator heavier.
+
+### What stays the same regardless
+
+- **gRPC server**: completely generic, just routes messages — no vendor knowledge
+- **AgentPool interface**: unchanged
+- **Proto**: unchanged — `apply_config` payload is opaque bytes
+- **Init config / commit-confirm safety**: each agent implements it for its platform
+
+### Higher-level controller
+
+A separate controller (above vrouter-operator) could own the network-wide intent:
+
+- Define a BGP-EVPN fabric topology as a CRD
+- Compute per-device configs from the topology
+- Create VRouterConfig (for VyOS) or CiscoConfig (for Cisco) CRDs
+- Each vendor operator renders and pushes via the shared gRPC layer
+
+This is out of scope for vrouter-operator but the gRPC design does not preclude it.
+
 ## Directory Structure (New Files)
 
 ```
