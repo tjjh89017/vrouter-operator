@@ -440,27 +440,60 @@ A separate controller (above vrouter-operator) could own the network-wide intent
 
 This is out of scope for vrouter-operator but the gRPC design does not preclude it.
 
-## Directory Structure (New Files)
+## Repo Structure Decision
+
+Proto, gRPC server, and gRPC agent (client) all live in a **separate repo** (`vrouter-agent`), as a single Go module with two binaries:
+
+```
+vrouter-agent/                    ← separate Go module / git repo
+├── proto/agent.proto
+├── pkg/grpcserver/               # server library (imported by vrouter-operator)
+├── cmd/server/main.go            # gRPC server binary (runs in k8s)
+└── cmd/agent/main.go             # gRPC agent binary (runs on VyOS)
+```
+
+**Dependency direction** (no circular import):
+
+```
+vrouter-operator  ──import──→  vrouter-agent/pkg/grpcserver (AgentPool interface)
+vrouter-agent/cmd/agent       ──import──→  vrouter-agent/proto
+vrouter-agent/pkg/grpcserver  ──import──→  vrouter-agent/proto
+vrouter-agent                 ──NEVER──→   vrouter-operator
+```
+
+Operator communicates with the gRPC server exclusively through the `AgentPool` interface. Agent never imports operator types — it receives opaque JSON payloads.
+
+### Agent: Pluggable Backend for Multi-OS
+
+The agent binary supports multiple OS backends via a `Backend` interface, selected at startup:
+
+```go
+type Backend interface {
+    ApplyConfig(ctx context.Context, payload []byte) (*Result, error)
+    GetStatus(ctx context.Context) (*Status, error)
+}
+```
+
+```bash
+vrouter-agent --backend vyos --server grpc.example.com:50051
+vrouter-agent --backend openwrt --server grpc.example.com:50051
+```
+
+Initially only VyOS backend is implemented. New OS support = new backend implementation, no changes to gRPC transport or operator.
+
+## Directory Structure (New Files in vrouter-operator)
 
 ```
 api/
 ├── v1/
 │   └── grpc_types.go              # GRPCAgentConfig type
-├── grpc/
-│   └── v1/
-│       └── agent.proto            # proto definition
 internal/
-├── agentpool/
-│   ├── pool.go                    # AgentPool interface + types
-│   ├── grpc_pool.go               # in-memory impl (initial)
-│   └── grpc_pool_test.go
-├── grpcserver/
-│   ├── server.go                  # gRPC server, pure stream management
-│   └── server_test.go
 ├── provider/
 │   └── grpc/
 │       └── provider.go            # Provider impl, calls AgentPool
 ```
+
+gRPC server, proto, agentpool, and agent code live in the `vrouter-agent` repo.
 
 ## Files to Modify
 
