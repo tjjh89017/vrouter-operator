@@ -94,7 +94,6 @@ spec:
                             type: string
                         required:
                         - name
-                        - namespace
                         type: object
                       vmid:
                         description: VMID of the virtual machine on Proxmox.

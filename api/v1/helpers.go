@@ -16,13 +16,10 @@ limitations under the License.
 
 package v1
 
-const ProviderProxmox ProviderType = "proxmox"
-
-// ProxmoxConfig holds Proxmox VE provider configuration and router identification.
-type ProxmoxConfig struct {
-	// VMID of the virtual machine on Proxmox.
-	VMID int `json:"vmid"`
-	// ClusterRef references a ProxmoxCluster resource that holds endpoint and credentials.
-	// Namespace may be omitted to use the same namespace as the VRouterTarget.
-	ClusterRef NameRef `json:"clusterRef"`
+// ResolveNamespace returns the ref's Namespace, falling back to defaultNS if empty.
+func ResolveNamespace(ref NameRef, defaultNS string) string {
+	if ref.Namespace != "" {
+		return ref.Namespace
+	}
+	return defaultNS
 }

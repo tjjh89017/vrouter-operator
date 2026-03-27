@@ -16,15 +16,12 @@ limitations under the License.
 
 package v1
 
-// NameRef is a reference to a resource by name.
+// NameRef is a reference to a resource by name, optionally in another namespace.
+// When Namespace is empty, the namespace of the referencing resource is used.
 type NameRef struct {
-	Name string `json:"name"`
-}
-
-// NamespacedRef is a reference to a resource by name and namespace.
-type NamespacedRef struct {
+	// +optional
+	Namespace string `json:"namespace,omitempty"`
 	Name      string `json:"name"`
-	Namespace string `json:"namespace"`
 }
 
 // ProviderType specifies the virtualization backend.

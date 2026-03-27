@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -88,28 +89,39 @@ func (r *VRouterBindingReconciler) setReadyCondition(ctx context.Context, bindin
 	}
 }
 
+// effectiveTemplateRefs returns the merged template ref list: templateRef (if set) prepended to templateRefs.
+func effectiveTemplateRefs(binding *vrouterv1.VRouterBinding) []vrouterv1.NameRef {
+	var refs []vrouterv1.NameRef
+	if binding.Spec.TemplateRef != nil { //nolint:staticcheck // backward compat
+		refs = append(refs, *binding.Spec.TemplateRef) //nolint:staticcheck // backward compat
+	}
+	refs = append(refs, binding.Spec.TemplateRefs...)
+	return refs
+}
+
 func (r *VRouterBindingReconciler) onChange(ctx context.Context, _ ctrl.Request, binding *vrouterv1.VRouterBinding) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
-	// Step 1: get template.
-	var tmpl vrouterv1.VRouterTemplate
-	if err := r.Get(ctx, client.ObjectKey{
-		Name:      binding.Spec.TemplateRef.Name,
-		Namespace: binding.Namespace,
-	}, &tmpl); err != nil {
-		err = fmt.Errorf("get template %q: %w", binding.Spec.TemplateRef.Name, err)
-		r.setReadyCondition(ctx, binding, metav1.ConditionFalse, "ReconcileError", err.Error())
-		return ctrl.Result{}, err
+	// Step 1: fetch all templates in order.
+	templateRefs := effectiveTemplateRefs(binding)
+	templates := make([]vrouterv1.VRouterTemplate, 0, len(templateRefs))
+	for _, ref := range templateRefs {
+		var tmpl vrouterv1.VRouterTemplate
+		ns := vrouterv1.ResolveNamespace(ref, binding.Namespace)
+		if err := r.Get(ctx, client.ObjectKey{Name: ref.Name, Namespace: ns}, &tmpl); err != nil {
+			err = fmt.Errorf("get template %q (namespace %q): %w", ref.Name, ns, err)
+			r.setReadyCondition(ctx, binding, metav1.ConditionFalse, "ReconcileError", err.Error())
+			return ctrl.Result{}, err
+		}
+		templates = append(templates, tmpl)
 	}
 
 	// Step 2: resolve targets, render and reconcile one VRouterConfig per target.
 	desired := make(map[string]bool, len(binding.Spec.TargetRefs))
 	for _, ref := range binding.Spec.TargetRefs {
 		var target vrouterv1.VRouterTarget
-		if err := r.Get(ctx, client.ObjectKey{
-			Name:      ref.Name,
-			Namespace: binding.Namespace,
-		}, &target); err != nil {
+		ns := vrouterv1.ResolveNamespace(ref, binding.Namespace)
+		if err := r.Get(ctx, client.ObjectKey{Name: ref.Name, Namespace: ns}, &target); err != nil {
 			err = fmt.Errorf("get target %q: %w", ref.Name, err)
 			r.setReadyCondition(ctx, binding, metav1.ConditionFalse, "ReconcileError", err.Error())
 			return ctrl.Result{}, err
@@ -123,19 +135,30 @@ func (r *VRouterBindingReconciler) onChange(ctx context.Context, _ ctrl.Request,
 			return ctrl.Result{}, err
 		}
 
-		// Step 4: render config and commands.
-		renderedConfig, err := vrotemplate.Render(tmpl.Spec.Config, params)
-		if err != nil {
-			err = fmt.Errorf("render config for target %q: %w", ref.Name, err)
-			r.setReadyCondition(ctx, binding, metav1.ConditionFalse, "ReconcileError", err.Error())
-			return ctrl.Result{}, err
+		// Step 4: render and concatenate config/commands from all templates in order.
+		var configParts, commandParts []string
+		for i, tmpl := range templates {
+			if tmpl.Spec.Config != "" {
+				rendered, err := vrotemplate.Render(tmpl.Spec.Config, params)
+				if err != nil {
+					err = fmt.Errorf("render config from template[%d] %q for target %q: %w", i, templateRefs[i].Name, ref.Name, err)
+					r.setReadyCondition(ctx, binding, metav1.ConditionFalse, "ReconcileError", err.Error())
+					return ctrl.Result{}, err
+				}
+				configParts = append(configParts, rendered)
+			}
+			if tmpl.Spec.Commands != "" {
+				rendered, err := vrotemplate.Render(tmpl.Spec.Commands, params)
+				if err != nil {
+					err = fmt.Errorf("render commands from template[%d] %q for target %q: %w", i, templateRefs[i].Name, ref.Name, err)
+					r.setReadyCondition(ctx, binding, metav1.ConditionFalse, "ReconcileError", err.Error())
+					return ctrl.Result{}, err
+				}
+				commandParts = append(commandParts, rendered)
+			}
 		}
-		renderedCommands, err := vrotemplate.Render(tmpl.Spec.Commands, params)
-		if err != nil {
-			err = fmt.Errorf("render commands for target %q: %w", ref.Name, err)
-			r.setReadyCondition(ctx, binding, metav1.ConditionFalse, "ReconcileError", err.Error())
-			return ctrl.Result{}, err
-		}
+		renderedConfig := strings.Join(configParts, "\n")
+		renderedCommands := strings.Join(commandParts, "\n")
 
 		// Step 5: create/update VRouterConfig.
 		cfgName := fmt.Sprintf("%s.%s", binding.Name, ref.Name)
@@ -207,16 +230,20 @@ func (r *VRouterBindingReconciler) SetupWithManager(mgr ctrl.Manager) error {
 }
 
 // bindingsForTemplate returns reconcile requests for all VRouterBindings that
-// reference the given VRouterTemplate.
+// reference the given VRouterTemplate (via templateRef or templateRefs).
 func (r *VRouterBindingReconciler) bindingsForTemplate(ctx context.Context, obj client.Object) []reconcile.Request {
 	var list vrouterv1.VRouterBindingList
-	if err := r.List(ctx, &list, client.InNamespace(obj.GetNamespace())); err != nil {
+	if err := r.List(ctx, &list); err != nil {
 		return nil
 	}
 	var reqs []reconcile.Request
 	for i := range list.Items {
-		if list.Items[i].Spec.TemplateRef.Name == obj.GetName() {
-			reqs = append(reqs, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(&list.Items[i])})
+		for _, ref := range effectiveTemplateRefs(&list.Items[i]) {
+			ns := vrouterv1.ResolveNamespace(ref, list.Items[i].Namespace)
+			if ref.Name == obj.GetName() && ns == obj.GetNamespace() {
+				reqs = append(reqs, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(&list.Items[i])})
+				break
+			}
 		}
 	}
 	return reqs
@@ -226,13 +253,14 @@ func (r *VRouterBindingReconciler) bindingsForTemplate(ctx context.Context, obj 
 // reference the given VRouterTarget.
 func (r *VRouterBindingReconciler) bindingsForTarget(ctx context.Context, obj client.Object) []reconcile.Request {
 	var list vrouterv1.VRouterBindingList
-	if err := r.List(ctx, &list, client.InNamespace(obj.GetNamespace())); err != nil {
+	if err := r.List(ctx, &list); err != nil {
 		return nil
 	}
 	var reqs []reconcile.Request
 	for i := range list.Items {
 		for _, ref := range list.Items[i].Spec.TargetRefs {
-			if ref.Name == obj.GetName() {
+			ns := vrouterv1.ResolveNamespace(ref, list.Items[i].Namespace)
+			if ref.Name == obj.GetName() && ns == obj.GetNamespace() {
 				reqs = append(reqs, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(&list.Items[i])})
 				break
 			}

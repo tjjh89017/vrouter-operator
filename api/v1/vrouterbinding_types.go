@@ -23,14 +23,20 @@ import (
 
 // VRouterBindingSpec defines the desired state of VRouterBinding.
 type VRouterBindingSpec struct {
-	TemplateRef NameRef `json:"templateRef"`
+	// Deprecated: use TemplateRefs instead. If non-nil, prepended to TemplateRefs as highest priority.
+	// +optional
+	TemplateRef *NameRef `json:"templateRef,omitempty"`
+	// TemplateRefs is an ordered list of templates to merge. Templates are applied in order;
+	// later templates' config and commands are appended after earlier ones.
+	// +optional
+	TemplateRefs []NameRef `json:"templateRefs,omitempty"`
+	TargetRefs   []NameRef `json:"targetRefs"`
 	// +kubebuilder:default=true
 	Save bool `json:"save,omitempty"`
 	// +kubebuilder:pruning:PreserveUnknownFields
 	// +kubebuilder:validation:Schemaless
 	// +optional
-	Params     apiextensionsv1.JSON `json:"params,omitempty"`
-	TargetRefs []NameRef            `json:"targetRefs"`
+	Params apiextensionsv1.JSON `json:"params,omitempty"`
 }
 
 // VRouterBindingStatus defines the observed state of VRouterBinding.

@@ -117,7 +117,7 @@ func (r *VRouterConfigReconciler) onChange(ctx context.Context, _ ctrl.Request, 
 	log := logf.FromContext(ctx)
 
 	var target vrouterv1.VRouterTarget
-	if err := r.Get(ctx, k8stypes.NamespacedName{Name: cfg.Spec.TargetRef.Name, Namespace: cfg.Namespace}, &target); err != nil {
+	if err := r.Get(ctx, k8stypes.NamespacedName{Name: cfg.Spec.TargetRef.Name, Namespace: vrouterv1.ResolveNamespace(cfg.Spec.TargetRef, cfg.Namespace)}, &target); err != nil {
 		return ctrl.Result{}, fmt.Errorf("get target %q: %w", cfg.Spec.TargetRef.Name, err)
 	}
 
@@ -274,7 +274,7 @@ func (r *VRouterConfigReconciler) vmiToVRouterConfigs(ctx context.Context, obj c
 	for i := range cfgList.Items {
 		cfg := &cfgList.Items[i]
 		var target vrouterv1.VRouterTarget
-		if err := r.Get(ctx, k8stypes.NamespacedName{Name: cfg.Spec.TargetRef.Name, Namespace: cfg.Namespace}, &target); err != nil {
+		if err := r.Get(ctx, k8stypes.NamespacedName{Name: cfg.Spec.TargetRef.Name, Namespace: vrouterv1.ResolveNamespace(cfg.Spec.TargetRef, cfg.Namespace)}, &target); err != nil {
 			continue
 		}
 		kv := target.Spec.Provider.KubeVirt

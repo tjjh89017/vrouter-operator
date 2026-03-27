@@ -88,7 +88,8 @@ func (v *VRouterBindingCustomValidator) ValidateCreate(ctx context.Context, obj 
 		return nil, fmt.Errorf("expected a VRouterBinding object but got %T", obj)
 	}
 	vrouterbindinglog.Info("Validation for VRouterBinding upon creation", "name", vrouterbinding.GetName())
-	return nil, validateBinding(ctx, v.Client, vrouterbinding)
+	warnings := deprecationWarnings(vrouterbinding)
+	return warnings, validateBinding(ctx, v.Client, vrouterbinding)
 }
 
 // ValidateUpdate implements webhook.CustomValidator so a webhook will be registered for the type VRouterBinding.
@@ -98,7 +99,8 @@ func (v *VRouterBindingCustomValidator) ValidateUpdate(ctx context.Context, oldO
 		return nil, fmt.Errorf("expected a VRouterBinding object for the newObj but got %T", newObj)
 	}
 	vrouterbindinglog.Info("Validation for VRouterBinding upon update", "name", vrouterbinding.GetName())
-	return nil, validateBinding(ctx, v.Client, vrouterbinding)
+	warnings := deprecationWarnings(vrouterbinding)
+	return warnings, validateBinding(ctx, v.Client, vrouterbinding)
 }
 
 // ValidateDelete implements webhook.CustomValidator so a webhook will be registered for the type VRouterBinding.
@@ -111,26 +113,57 @@ func (v *VRouterBindingCustomValidator) ValidateDelete(_ context.Context, obj ru
 	return nil, nil
 }
 
+// deprecationWarnings returns admission warnings for deprecated fields.
+func deprecationWarnings(binding *vrouterv1.VRouterBinding) admission.Warnings {
+	var warnings admission.Warnings
+	if binding.Spec.TemplateRef != nil { //nolint:staticcheck // backward compat
+		warnings = append(warnings, "spec.templateRef is deprecated, use spec.templateRefs instead")
+	}
+	return warnings
+}
+
 func validateBinding(ctx context.Context, cl client.Client, binding *vrouterv1.VRouterBinding) error {
 	if len(binding.Spec.TargetRefs) == 0 {
 		return fmt.Errorf("spec.targetRefs must not be empty")
 	}
 
-	// Verify templateRef exists.
-	var tmpl vrouterv1.VRouterTemplate
-	if err := cl.Get(ctx, types.NamespacedName{Namespace: binding.Namespace, Name: binding.Spec.TemplateRef.Name}, &tmpl); err != nil {
-		if apierrors.IsNotFound(err) {
-			return fmt.Errorf("spec.templateRef %q not found", binding.Spec.TemplateRef.Name)
+	// Verify at least one template ref is provided.
+	if binding.Spec.TemplateRef == nil && len(binding.Spec.TemplateRefs) == 0 { //nolint:staticcheck // backward compat
+		return fmt.Errorf("at least one of spec.templateRef or spec.templateRefs must be set")
+	}
+
+	// Verify templateRef exists (if set).
+	if binding.Spec.TemplateRef != nil { //nolint:staticcheck // backward compat
+		var tmpl vrouterv1.VRouterTemplate
+		ref := *binding.Spec.TemplateRef //nolint:staticcheck // backward compat
+		ns := vrouterv1.ResolveNamespace(ref, binding.Namespace)
+		if err := cl.Get(ctx, types.NamespacedName{Namespace: ns, Name: ref.Name}, &tmpl); err != nil {
+			if apierrors.IsNotFound(err) {
+				return fmt.Errorf("spec.templateRef %q (namespace %q) not found", ref.Name, ns)
+			}
+			return fmt.Errorf("get templateRef: %w", err)
 		}
-		return fmt.Errorf("get templateRef: %w", err)
+	}
+
+	// Verify each templateRefs entry exists.
+	for i, ref := range binding.Spec.TemplateRefs {
+		var tmpl vrouterv1.VRouterTemplate
+		ns := vrouterv1.ResolveNamespace(ref, binding.Namespace)
+		if err := cl.Get(ctx, types.NamespacedName{Namespace: ns, Name: ref.Name}, &tmpl); err != nil {
+			if apierrors.IsNotFound(err) {
+				return fmt.Errorf("spec.templateRefs[%d] %q (namespace %q) not found", i, ref.Name, ns)
+			}
+			return fmt.Errorf("get templateRefs[%d] %q: %w", i, ref.Name, err)
+		}
 	}
 
 	// Verify each targetRef exists.
 	for _, ref := range binding.Spec.TargetRefs {
 		var target vrouterv1.VRouterTarget
-		if err := cl.Get(ctx, types.NamespacedName{Namespace: binding.Namespace, Name: ref.Name}, &target); err != nil {
+		ns := vrouterv1.ResolveNamespace(ref, binding.Namespace)
+		if err := cl.Get(ctx, types.NamespacedName{Namespace: ns, Name: ref.Name}, &target); err != nil {
 			if apierrors.IsNotFound(err) {
-				return fmt.Errorf("spec.targetRefs %q not found", ref.Name)
+				return fmt.Errorf("spec.targetRefs %q (namespace %q) not found", ref.Name, ns)
 			}
 			return fmt.Errorf("get targetRef %q: %w", ref.Name, err)
 		}

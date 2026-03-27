@@ -49,25 +49,48 @@ spec:
                 type: boolean
               targetRefs:
                 items:
-                  description: NameRef is a reference to a resource by name.
+                  description: |-
+                    NameRef is a reference to a resource by name, optionally in another namespace.
+                    When Namespace is empty, the namespace of the referencing resource is used.
                   properties:
                     name:
+                      type: string
+                    namespace:
                       type: string
                   required:
                   - name
                   type: object
                 type: array
               templateRef:
-                description: NameRef is a reference to a resource by name.
+                description: 'Deprecated: use TemplateRefs instead. If non-nil, prepended
+                  to TemplateRefs as highest priority.'
                 properties:
                   name:
+                    type: string
+                  namespace:
                     type: string
                 required:
                 - name
                 type: object
+              templateRefs:
+                description: |-
+                  TemplateRefs is an ordered list of templates to merge. Templates are applied in order;
+                  later templates' config and commands are appended after earlier ones.
+                items:
+                  description: |-
+                    NameRef is a reference to a resource by name, optionally in another namespace.
+                    When Namespace is empty, the namespace of the referencing resource is used.
+                  properties:
+                    name:
+                      type: string
+                    namespace:
+                      type: string
+                  required:
+                  - name
+                  type: object
+                type: array
             required:
             - targetRefs
-            - templateRef
             type: object
           status:
             description: VRouterBindingStatus defines the observed state of VRouterBinding.

@@ -81,6 +81,23 @@ Use a field index on `.spec.provider.kubevirt.name` + `.spec.provider.kubevirt.n
 
 BindingController already watches VRouterTarget and will re-reconcile on health changes, but Binding re-reconcile only re-renders spec — it does **not** reset VRouterConfig phase. Phase reset must be done by TargetController.
 
+---
+
+## VRouterConfig: loadDefaultConfigOnDelete
+
+**Goal**: Option to load a default/baseline config on the router when a VRouterConfig is deleted, so the router doesn't retain stale configuration.
+
+### Considerations
+
+- Semantics of "default config" need clear definition (VyOS startup config? user-specified baseline?)
+- Deletion path becomes slow and can block if VM/QGA is unreachable (finalizer stuck)
+- Interaction with `save: true` — after loading default, should it save again?
+- Orphan cleanup in BindingController already deletes VRouterConfigs; triggering load-default on every orphan delete may cause unintended rollbacks when multiple configs target the same router
+- Consider placing the policy at VRouterBinding level (`cleanupPolicy: LoadDefault | Retain`, similar to PV reclaimPolicy) rather than per-VRouterConfig
+- Need a timeout + force-delete escape hatch to avoid permanently stuck finalizers
+
+---
+
 ### Open Design Questions
 
 1. **QGA ping vs VMI phase**: VMI Running does not guarantee QGA is responsive (boot window). Option: use VMI phase as proxy; let VRouterController's natural failure → Failed handle the transient window. QGA-level ping adds complexity.

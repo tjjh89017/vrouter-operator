@@ -38,7 +38,7 @@ var _ = Describe("VRouterBinding Controller", func() {
 
 		typeNamespacedName := types.NamespacedName{
 			Name:      resourceName,
-			Namespace: "default", // TODO(user):Modify as needed
+			Namespace: "default",
 		}
 		vrouterbinding := &vrouterv1.VRouterBinding{}
 
@@ -52,7 +52,7 @@ var _ = Describe("VRouterBinding Controller", func() {
 						Namespace: "default",
 					},
 					Spec: vrouterv1.VRouterBindingSpec{
-						TemplateRef: vrouterv1.NameRef{Name: "test-template"},
+						TemplateRef: &vrouterv1.NameRef{Name: "test-template"},
 						TargetRefs:  []vrouterv1.NameRef{{Name: "test-target"}},
 					},
 				}
@@ -61,7 +61,6 @@ var _ = Describe("VRouterBinding Controller", func() {
 		})
 
 		AfterEach(func() {
-			// TODO(user): Cleanup logic after each test, like removing the resource instance.
 			resource := &vrouterv1.VRouterBinding{}
 			err := k8sClient.Get(ctx, typeNamespacedName, resource)
 			Expect(err).NotTo(HaveOccurred())
@@ -80,8 +79,70 @@ var _ = Describe("VRouterBinding Controller", func() {
 				NamespacedName: typeNamespacedName,
 			})
 			Expect(err).NotTo(HaveOccurred())
-			// TODO(user): Add more specific assertions depending on your controller's reconciliation logic.
-			// Example: If you expect a certain status condition after reconciliation, verify it here.
+		})
+	})
+
+	Context("effectiveTemplateRefs", func() {
+		It("should return only templateRefs when templateRef is nil", func() {
+			binding := &vrouterv1.VRouterBinding{
+				Spec: vrouterv1.VRouterBindingSpec{
+					TemplateRefs: []vrouterv1.NameRef{
+						{Name: "tmpl-a"},
+						{Name: "tmpl-b"},
+					},
+				},
+			}
+			refs := effectiveTemplateRefs(binding)
+			Expect(refs).To(HaveLen(2))
+			Expect(refs[0].Name).To(Equal("tmpl-a"))
+			Expect(refs[1].Name).To(Equal("tmpl-b"))
+		})
+
+		It("should prepend templateRef when set", func() {
+			binding := &vrouterv1.VRouterBinding{
+				Spec: vrouterv1.VRouterBindingSpec{
+					TemplateRef: &vrouterv1.NameRef{Name: "tmpl-priority"},
+					TemplateRefs: []vrouterv1.NameRef{
+						{Name: "tmpl-a"},
+						{Name: "tmpl-b"},
+					},
+				},
+			}
+			refs := effectiveTemplateRefs(binding)
+			Expect(refs).To(HaveLen(3))
+			Expect(refs[0].Name).To(Equal("tmpl-priority"))
+			Expect(refs[1].Name).To(Equal("tmpl-a"))
+			Expect(refs[2].Name).To(Equal("tmpl-b"))
+		})
+
+		It("should return single-element list when only templateRef is set", func() {
+			binding := &vrouterv1.VRouterBinding{
+				Spec: vrouterv1.VRouterBindingSpec{
+					TemplateRef: &vrouterv1.NameRef{Name: "tmpl-only"},
+				},
+			}
+			refs := effectiveTemplateRefs(binding)
+			Expect(refs).To(HaveLen(1))
+			Expect(refs[0].Name).To(Equal("tmpl-only"))
+		})
+
+		It("should return empty when neither is set", func() {
+			binding := &vrouterv1.VRouterBinding{}
+			refs := effectiveTemplateRefs(binding)
+			Expect(refs).To(BeEmpty())
+		})
+
+		It("should preserve namespace from templateRef", func() {
+			binding := &vrouterv1.VRouterBinding{
+				Spec: vrouterv1.VRouterBindingSpec{
+					TemplateRef:  &vrouterv1.NameRef{Namespace: "ns-a", Name: "tmpl-a"},
+					TemplateRefs: []vrouterv1.NameRef{{Namespace: "ns-b", Name: "tmpl-b"}},
+				},
+			}
+			refs := effectiveTemplateRefs(binding)
+			Expect(refs).To(HaveLen(2))
+			Expect(refs[0].Namespace).To(Equal("ns-a"))
+			Expect(refs[1].Namespace).To(Equal("ns-b"))
 		})
 	})
 })
