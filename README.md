@@ -189,7 +189,7 @@ spec:
 
 ### 4. Create a VRouterBinding
 
-Bind the template to one or more targets:
+Bind one or more templates to one or more targets:
 
 ```yaml
 apiVersion: vrouter.kojuro.date/v1
@@ -198,8 +198,8 @@ metadata:
   name: hostname-binding
   namespace: default
 spec:
-  templateRef:
-    name: hostname-template
+  templateRefs:                    # ordered list; config/commands concatenated in order
+    - name: hostname-template
   save: true          # persist config after commit (default: true)
   targetRefs:
     - name: vyos-kubevirt
@@ -325,6 +325,17 @@ kubectl wait vrc/<name> --for=condition=Applied --timeout=120s
 |----------|--------|-------|
 | KubeVirt | ✅ Supported | Same-cluster KubeVirt; SPDY exec into virt-launcher pod |
 | Proxmox VE | ✅ Supported | REST API + QGA; credentials via ProxmoxCluster |
+| gRPC Agent (bare metal) | 📋 Planned | See [gRPC proposal](docs/proposals/grpc-agent-architecture.md) |
+
+---
+
+## Documentation
+
+| Document | Description |
+|----------|-------------|
+| [docs/SPEC.md](docs/SPEC.md) | Authoritative design spec (implemented state) |
+| [docs/TODO.md](docs/TODO.md) | Backlog — planned features, not yet implemented |
+| [docs/proposals/](docs/proposals/) | Design proposals for future features |
 
 ---
 

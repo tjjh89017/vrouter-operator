@@ -1,6 +1,9 @@
 # vRouter-Operator Design Spec
 
 > CRD Architecture & Controller Design
+>
+> This document reflects the **implemented** state of the codebase.
+> For planned features, see [TODO.md](TODO.md). For proposals, see [proposals/](proposals/).
 
 ---
 
@@ -20,7 +23,7 @@ VRouterTemplate + VRouterTarget + VRouterBinding
    BindingController
    → resolve targetRefs
    → merge params (binding → target)
-   → render template
+   → render and concatenate templates in order
    → create/update VRouterConfig per router (ownerRef → Binding)
          │
    VRouterController
@@ -33,18 +36,21 @@ VRouterTemplate + VRouterTarget + VRouterBinding
 
 ### 2.2 Provider Abstraction
 
-Each provider implements a common interface for router discovery and command execution:
+Each provider instance is bound to a specific target router at construction time:
 
 ```go
 type Provider interface {
-    // GetRouter returns router info for the given exact ref
-    GetRouter(ctx context.Context, ref RouterRef) (*RouterInfo, error)
-    // WriteFile writes content to a file on the target router via guest agent
-    WriteFile(ctx context.Context, ref RouterRef, path string, content []byte) error
-    // ExecScript executes a script file on the target router, returns PID for async tracking
-    ExecScript(ctx context.Context, ref RouterRef, path string) (pid int64, err error)
-    // GetExecStatus checks the execution status of a previously started script
-    GetExecStatus(ctx context.Context, ref RouterRef, pid int64) (*ExecStatus, error)
+    // IsVMRunning checks whether the underlying VM is in a running state.
+    IsVMRunning(ctx context.Context) (bool, error)
+    // CheckReady verifies the router is reachable and ready to accept config
+    // (QGA ping + vyos-router.service is-active).
+    CheckReady(ctx context.Context) error
+    // WriteFile writes the apply script content to the router via guest agent.
+    WriteFile(ctx context.Context, content []byte) error
+    // ExecScript executes the apply script asynchronously, returns PID for tracking.
+    ExecScript(ctx context.Context) (pid int64, err error)
+    // GetExecStatus polls the result of a previously started script.
+    GetExecStatus(ctx context.Context, pid int64) (*ExecStatus, error)
 }
 
 type ExecStatus struct {
@@ -54,6 +60,8 @@ type ExecStatus struct {
     Stderr   string
 }
 ```
+
+The script destination path (`/tmp/vrouter-apply.sh`) and execution command (`/bin/vbash`) are fixed inside the provider. The controller only provides the script content.
 
 ### 2.3 KubeVirt Provider (Default)
 
@@ -73,7 +81,7 @@ req := clientset.CoreV1().RESTClient().Post().
 
 ### 2.4 Proxmox VE Provider
 
-Uses Proxmox REST API to execute QGA commands on remote Proxmox nodes. API credentials and endpoints are managed by a `ProxmoxCluster` CRD; `VRouterTarget` references the cluster via `spec.provider.proxmox.clusterRef`.
+Uses Proxmox REST API to execute QGA commands on remote Proxmox nodes. API credentials and endpoints are managed by a `ProxmoxCluster` CRD; `VRouterTarget` references the cluster via `spec.provider.proxmox.clusterRef`. Supports endpoint failover (tries endpoints in order).
 
 ---
 
@@ -156,14 +164,15 @@ spec:
 
 - `provider.type` defaults to `kubevirt` if omitted
 - For KubeVirt, `kubevirt.name` identifies the VM; defaults to same cluster; optionally specify a remote kubeconfig via Secret
-- For Proxmox, `proxmox.vmid` identifies the VM; `endpoint` and `credentialsRef` are required
+- For Proxmox, `proxmox.vmid` identifies the VM; `clusterRef` references a ProxmoxCluster resource
 - `params` uses `x-kubernetes-preserve-unknown-fields: true`; stored as `apiextensionsv1.JSON` in Go
+- Short names: `vrt`, `vroutertarget`
 
 ---
 
 ### 3.3 VRouterBinding
 
-Combines a template with multiple targets, providing common params (lowest priority).
+Combines an ordered list of templates with multiple targets, providing common params (lowest priority).
 
 ```yaml
 apiVersion: vrouter.kojuro.date/v1
@@ -171,8 +180,9 @@ kind: VRouterBinding
 metadata:
   name: bgp-binding
 spec:
-  templateRef:
-    name: bgp-router
+  templateRefs:             # ordered list; later templates' config/commands appended after earlier ones
+    - name: base-config
+    - name: bgp-router
   save: true              # persist config after commit, default: true
   params:                 # common, lowest priority
     ntpServer: "10.0.0.1"
@@ -181,6 +191,10 @@ spec:
     - name: site-a-routers
     - name: site-b-routers
 ```
+
+> **Backward compatibility**: The deprecated `templateRef` field (singular, optional) is still accepted. If set, it is prepended to `templateRefs` as the highest-priority (first) template.
+
+Short names: `vrb`, `vrouterbinding`
 
 ---
 
@@ -210,7 +224,8 @@ status:
 - `endpoints`: multiple endpoints supported for HA Proxmox clusters; each request tries them in order
 - `credentialsRef`: references a Secret with keys `api-token-id` and `api-token-secret`
 - `syncInterval`: controls poll frequency for node tracking (default: 60s)
-- `checkGuestUptime`: when true, queries `/proc/uptime` via QGA to detect guest-initiated reboots that don't restart the QEMU process
+- `checkGuestUptime`: when true, queries `/proc/uptime` via QGA to detect guest-initiated reboots that don't restart the QEMU process (default: true)
+- Short names: `pxc`, `proxmoxcluster`
 
 ---
 
@@ -255,6 +270,8 @@ status:
   observedGeneration: 1
   message: ""
 ```
+
+Short names: `vrc`, `vrouterconfig`
 
 ---
 
@@ -347,9 +364,11 @@ Performs cross-field validation that kubebuilder JSON schema markers cannot expr
 
 | Resource | Validation |
 |----------|------------|
-| VRouterTarget | `provider.kubevirt` must be set when `type=kubevirt`; `provider.proxmox` must be set when `type=proxmox` |
+| VRouterTarget | `provider.kubevirt` must be set when `type=kubevirt`; `provider.proxmox` must be set when `type=proxmox`; for Proxmox, `clusterRef.name` is mandatory |
 | VRouterConfig | Same provider cross-field validation as VRouterTarget |
 | VRouterBinding | `spec.targetRefs` must not be empty |
+
+Webhooks are disabled when `ENABLE_WEBHOOKS=false` (env var, checked in `cmd/main.go`).
 
 ---
 
@@ -376,11 +395,11 @@ else:
 
 **reconcileNormal (onChange)**:
 
-1. Lookup `templateRef` → get VRouterTemplate
-2. Lookup each `targetRef` → get VRouterTarget
-3. Read `target.provider` — identify router via provider-specific config (KubeVirt: name/namespace, Proxmox: vmid)
+1. Resolve effective template list via `effectiveTemplateRefs()` (deprecated `templateRef` prepended to `templateRefs`)
+2. Lookup each template → get VRouterTemplate
+3. Lookup each `targetRef` → get VRouterTarget
 4. Merge params: `binding.params` → `target.params`
-5. Render template with merged params
+5. Render and concatenate config/commands from templates in order
 6. Create/update VRouterConfig with:
    - `ownerReference` → binding (for cascade delete via K8s GC)
    - `vrouter.kojuro.date/binding` label → binding name (for listing)
@@ -441,24 +460,6 @@ for _, cfg := range existing.Items {
 | Apply | Pre-check → render script → write file → execute → poll |
 | Status | `phase` is display-only; `observedGeneration` + `execPID` drive control flow |
 
-**Provider interface** (each instance is bound to one target router, configured at construction):
-
-```go
-type Provider interface {
-    // CheckReady verifies the router is reachable and ready to accept config
-    // (QGA ping + vyos-router.service is-active).
-    CheckReady(ctx context.Context) error
-    // WriteFile writes the rendered apply script to the router via guest agent.
-    // The destination path (/tmp/vrouter-apply.sh) is fixed inside the provider.
-    WriteFile(ctx context.Context, content []byte) error
-    // ExecScript executes the apply script asynchronously, returns PID for tracking.
-    // The script path is fixed inside the provider.
-    ExecScript(ctx context.Context) (pid int64, err error)
-    // GetExecStatus polls the result of a previously started script.
-    GetExecStatus(ctx context.Context, pid int64) (*ExecStatus, error)
-}
-```
-
 **Reconcile flow:**
 
 ```
@@ -468,22 +469,27 @@ Reconcile():
   → onChange
 
 onChange():
-  1. CheckReady()
+  1. Fetch VRouterTarget, create provider
+  2. IsVMRunning()
+     → false → skip (VM stopped, no action)
+  3. CheckReady()
      → fail → return error (controller requeues with backoff)
 
-  2. if generation == observedGeneration:
-       if execPID > 0:
-         GetExecStatus(execPID)
-         → still running → requeue(3s)
-         → exitCode == 0 → clear PID, set phase=Applied, condition Applied=True, return nil
-         → exitCode != 0 → clear PID, set phase=Failed, condition Applied=False, return nil
-       else:
-         return nil  ← already done for this generation (Applied or Failed)
+  4. if execPID > 0:
+       GetExecStatus(execPID)
+       → still running → requeue(3s)
+       → exitCode == 0 → clear PID, set phase=Applied, condition Applied=True, return nil
+       → exitCode != 0 → clear PID, set phase=Failed, condition Applied=False, return nil
 
-  3. (generation > observedGeneration → new spec)
+  5. Check reboot: if target.status.lastRebootTime > status.lastAppliedTime → force re-apply
+
+  6. if generation == observedGeneration and phase is Applied/Failed:
+       return nil  ← already done for this generation
+
+  7. (new spec or reboot detected)
      render internal script template
-     WriteFile(script)          ← path fixed inside provider
-     pid = ExecScript()         ← path fixed inside provider
+     WriteFile(script)
+     pid = ExecScript()
      set execPID=pid, observedGeneration=generation, phase=Applying
      return requeue(3s)
 
@@ -494,6 +500,7 @@ onDelete():
 **Key semantics:**
 - `generation == observedGeneration` → exec for this spec version has been dispatched (running or finished)
 - `generation > observedGeneration` → new spec available, dispatch exec
+- `target.status.lastRebootTime > status.lastAppliedTime` → VM rebooted, force re-apply regardless of generation
 - Failed phase has no auto-retry; user updates spec (increments generation) to re-trigger
 
 **Condition (for `kubectl wait`):**
@@ -523,24 +530,24 @@ kubectl wait --for=condition=Applied vrouterconfig/myconfig --timeout=60s
    Build HTTP client (respect insecureSkipTLSVerify)
 
 3. GET /api2/json/cluster/resources?type=vm  (tries endpoints in order)
-   → Build map: vmid → node
+   → Build map: vmid → {node, uptime}
 
 4. List all VRouterTargets referencing this ProxmoxCluster (clusterRef.name == cluster.Name)
    For each target:
-     a. Update status.proxmoxNode = map[vmid] (or "" if not found)
-     b. If checkGuestUptime:
-          GET /api2/json/nodes/{node}/qemu/{vmid}/agent/exec (guest uptime command)
-          Parse /proc/uptime → uptimeSeconds
-          If uptimeSeconds < 1.5 × syncInterval → set status.lastRebootTime = now
-     c. Patch VRouterTarget.status
+     a. Update status.proxmoxNode = map[vmid].node (or "" if not found)
+     b. Detect reboot from Proxmox uptime: if uptime ≤ 1.5 × syncInterval → set lastRebootTime = now
+     c. If checkGuestUptime enabled:
+          Async exec `cat /proc/uptime` via QGA, poll with 10s timeout
+          If guest uptime ≤ 1.5 × syncInterval → set lastRebootTime = now
+     d. Patch VRouterTarget.status
 
-5. Set status.lastSyncTime = now, update Ready condition
+5. Set status.lastSyncTime = now, update Synced condition
    Return RequeueAfter(syncInterval)
 ```
 
 **Purpose of `proxmoxNode` and `lastRebootTime`:**
 - `proxmoxNode`: The provider factory reads this to build the Proxmox provider with the correct node name, since Proxmox QGA commands are node-scoped.
-- `lastRebootTime`: Reserved for future use by a TargetController that can reset VRouterConfig phases after a reboot.
+- `lastRebootTime`: VRouterConfig controller compares this against `lastAppliedTime` to force re-apply after a reboot.
 
 ---
 
@@ -655,6 +662,7 @@ CRD schemas are generated from Go structs via kubebuilder markers. Run `make man
 
 ```go
 //+kubebuilder:object:root=true
+//+kubebuilder:resource:shortName={vrtt,vroutertemplate}
 type VRouterTemplate struct {
     metav1.TypeMeta   `json:",inline"`
     metav1.ObjectMeta `json:"metadata,omitempty"`
@@ -673,10 +681,13 @@ type VRouterTemplateSpec struct {
 
 ```go
 //+kubebuilder:object:root=true
+//+kubebuilder:subresource:status
+//+kubebuilder:resource:shortName={vrt,vroutertarget}
 type VRouterTarget struct {
     metav1.TypeMeta   `json:",inline"`
     metav1.ObjectMeta `json:"metadata,omitempty"`
-    Spec VRouterTargetSpec `json:"spec,omitempty"`
+    Spec   VRouterTargetSpec   `json:"spec,omitempty"`
+    Status VRouterTargetStatus `json:"status,omitempty"`
 }
 
 type VRouterTargetSpec struct {
@@ -686,6 +697,17 @@ type VRouterTargetSpec struct {
     // +optional
     Params apiextensionsv1.JSON `json:"params,omitempty"`
 }
+
+type VRouterTargetStatus struct {
+    // ProxmoxNode is the Proxmox cluster node currently hosting the VM.
+    // Populated and kept up-to-date by ProxmoxClusterController.
+    // +optional
+    ProxmoxNode string `json:"proxmoxNode,omitempty"`
+    // LastRebootTime is set when ProxmoxClusterController detects guest uptime
+    // is within 1.5× syncInterval (recently rebooted).
+    // +optional
+    LastRebootTime *metav1.Time `json:"lastRebootTime,omitempty"`
+}
 ```
 
 ### 9.3 VRouterBinding
@@ -693,6 +715,7 @@ type VRouterTargetSpec struct {
 ```go
 //+kubebuilder:object:root=true
 //+kubebuilder:subresource:status
+//+kubebuilder:resource:shortName={vrb,vrouterbinding}
 type VRouterBinding struct {
     metav1.TypeMeta   `json:",inline"`
     metav1.ObjectMeta `json:"metadata,omitempty"`
@@ -701,23 +724,25 @@ type VRouterBinding struct {
 }
 
 type VRouterBindingSpec struct {
-    TemplateRef NameRef `json:"templateRef"`
+    // Deprecated: use TemplateRefs instead. If non-nil, prepended to TemplateRefs as highest priority.
+    // +optional
+    TemplateRef *NameRef `json:"templateRef,omitempty"`
+    // TemplateRefs is an ordered list of templates to merge. Templates are applied in order;
+    // later templates' config and commands are appended after earlier ones.
+    // +optional
+    TemplateRefs []NameRef `json:"templateRefs,omitempty"`
+    TargetRefs   []NameRef `json:"targetRefs"`
     // +kubebuilder:default=true
     Save bool `json:"save,omitempty"`
     // +kubebuilder:pruning:PreserveUnknownFields
     // +kubebuilder:validation:Schemaless
     // +optional
-    Params     apiextensionsv1.JSON `json:"params,omitempty"`
-    TargetRefs []NameRef            `json:"targetRefs"`
+    Params apiextensionsv1.JSON `json:"params,omitempty"`
 }
 
 type VRouterBindingStatus struct {
     // +optional
     Conditions []metav1.Condition `json:"conditions,omitempty"`
-}
-
-type NameRef struct {
-    Name string `json:"name"`
 }
 ```
 
@@ -726,6 +751,7 @@ type NameRef struct {
 ```go
 //+kubebuilder:object:root=true
 //+kubebuilder:subresource:status
+//+kubebuilder:resource:shortName={vrc,vrouterconfig}
 //+kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
 //+kubebuilder:printcolumn:name="Target",type=string,JSONPath=`.spec.targetRef.name`
 //+kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
@@ -758,7 +784,6 @@ type VRouterConfigStatus struct {
     // +optional
     Message string `json:"message,omitempty"`
     // ObservedGeneration is the generation for which exec was last dispatched.
-    // Used with metadata.generation to detect new spec versions.
     // +optional
     ObservedGeneration int64 `json:"observedGeneration,omitempty"`
     // Conditions for kubectl wait support. The "Applied" condition is True
@@ -771,6 +796,14 @@ type VRouterConfigStatus struct {
 ### 9.5 Shared Types
 
 ```go
+// NameRef is a reference to a resource by name, optionally in another namespace.
+// When Namespace is empty, the namespace of the referencing resource is used.
+type NameRef struct {
+    // +optional
+    Namespace string `json:"namespace,omitempty"`
+    Name      string `json:"name"`
+}
+
 // +kubebuilder:validation:Enum=kubevirt;proxmox
 type ProviderType string
 
@@ -787,15 +820,6 @@ type ProviderConfig struct {
     KubeVirt *KubeVirtConfig `json:"kubevirt,omitempty"`
     // +optional
     Proxmox  *ProxmoxConfig  `json:"proxmox,omitempty"`
-}
-
-type NameRef struct {
-    Name string `json:"name"`
-}
-
-type NamespacedRef struct {
-    Name      string `json:"name"`
-    Namespace string `json:"namespace"`
 }
 
 type SecretKeyRef struct {
@@ -834,13 +858,26 @@ type ProxmoxConfig struct {
     VMID int `json:"vmid"`
     // ClusterRef references a ProxmoxCluster resource that holds endpoint and credentials.
     // Namespace may be omitted to use the same namespace as the VRouterTarget.
-    ClusterRef NamespacedRef `json:"clusterRef"`
+    ClusterRef NameRef `json:"clusterRef"`
 }
 ```
 
 ### 9.8 ProxmoxCluster Types
 
 ```go
+//+kubebuilder:object:root=true
+//+kubebuilder:subresource:status
+//+kubebuilder:resource:shortName={pxc,proxmoxcluster}
+//+kubebuilder:printcolumn:name="Endpoint",type=string,JSONPath=`.spec.endpoints[0]`
+//+kubebuilder:printcolumn:name="LastSync",type=date,JSONPath=`.status.lastSyncTime`
+//+kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
+type ProxmoxCluster struct {
+    metav1.TypeMeta   `json:",inline"`
+    metav1.ObjectMeta `json:"metadata,omitempty"`
+    Spec   ProxmoxClusterSpec   `json:"spec,omitempty"`
+    Status ProxmoxClusterStatus `json:"status,omitempty"`
+}
+
 type ProxmoxClusterSpec struct {
     // Endpoints tried in order until one responds (HA cluster support).
     Endpoints []string `json:"endpoints"`
@@ -852,7 +889,7 @@ type ProxmoxClusterSpec struct {
     // +kubebuilder:default="60s"
     // +optional
     SyncInterval metav1.Duration `json:"syncInterval,omitempty"`
-    // +kubebuilder:default=false
+    // +kubebuilder:default=true
     // +optional
     CheckGuestUptime bool `json:"checkGuestUptime,omitempty"`
 }
@@ -865,30 +902,44 @@ type ProxmoxClusterStatus struct {
 }
 ```
 
-### 9.9 VRouterTarget Status
+### 9.9 Constants
 
 ```go
-//+kubebuilder:subresource:status
-type VRouterTarget struct { ... }
+const (
+    FinalizerName = "vrouter.kojuro.date/finalizer"
+    LabelBinding  = "vrouter.kojuro.date/binding"
+    LabelTarget   = "vrouter.kojuro.date/target"
+)
 
-type VRouterTargetStatus struct {
-    // ProxmoxNode is the Proxmox cluster node currently hosting the VM.
-    // Populated and kept up-to-date by ProxmoxClusterController.
-    // +optional
-    ProxmoxNode string `json:"proxmoxNode,omitempty"`
-    // LastRebootTime is set when ProxmoxClusterController detects guest uptime
-    // is within 1.5× syncInterval (recently rebooted).
-    // +optional
-    LastRebootTime *metav1.Time `json:"lastRebootTime,omitempty"`
-}
+// VRouterConfig phase constants.
+const (
+    PhasePending  = "Pending"
+    PhaseApplying = "Applying"
+    PhaseApplied  = "Applied"
+    PhaseFailed   = "Failed"
+)
+
+const ConditionApplied = "Applied"  // VRouterConfig
+const ConditionReady   = "Ready"    // VRouterBinding
 ```
+
+### 9.10 QGA Constants
+
+```go
+const (
+    VyOSService = "vyos-router.service"
+    ScriptPath  = "/tmp/vrouter-apply.sh"
+)
+```
+
+QGA command templates: `CmdPing`, `CmdFileOpen`, `CmdFileWrite`, `CmdFileClose`, `CmdExecServiceSubState`, `CmdExecScript`, `CmdExecStatus`.
 
 ---
 
 ## 10. CRD Relationship Diagram
 
 ```
-ProxmoxCluster ──clusterRef──→ VRouterTarget ←──targetRefs──  VRouterBinding ──templateRef──→ VRouterTemplate
+ProxmoxCluster ──clusterRef──→ VRouterTarget ←──targetRefs──  VRouterBinding ──templateRefs──→ VRouterTemplate(s)
 (endpoints +                   (provider + params)                    (combine + common params)    (template logic)
  credentials)                        │
       │                              │

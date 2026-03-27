@@ -47,13 +47,15 @@ Always use `git commit -s` (DCO sign-off) for all commits.
 
 ## Design spec
 
-**Read `SPEC.md` first.** It is the authoritative design document and covers CRD schemas, controller flow, provider abstraction, params merge semantics, template engine, webhook rules, QGA script execution, and RBAC requirements in detail.
+**Read `docs/SPEC.md` first.** It is the authoritative design document and covers CRD schemas, controller flow, provider abstraction, params merge semantics, template engine, webhook rules, QGA script execution, and RBAC requirements in detail.
 
-**`TODO.md` is the backlog.** Items there are design proposals only — do not implement anything from TODO.md unless explicitly instructed.
+**`docs/TODO.md` is the backlog.** Items there are design proposals only — do not implement anything from TODO.md unless explicitly instructed.
+
+**`docs/proposals/`** contains detailed design proposals for future features (gRPC agent, drift detection, multi-OS support).
 
 ## Architecture
 
-This is a **kubebuilder/operator-sdk** operator (Go module: `github.com/tjjh89017/vrouter-operator`, API group: `vrouter.kojuro.date/v1`). See `SPEC.md §2` for the full architecture diagram.
+This is a **kubebuilder/operator-sdk** operator (Go module: `github.com/tjjh89017/vrouter-operator`, API group: `vrouter.kojuro.date/v1`). See `docs/SPEC.md §2` for the full architecture diagram.
 
 ### Key directories
 
@@ -72,11 +74,11 @@ Shared types live in `api/v1/shared_types.go` (ProviderConfig, SecretReference, 
 Provider-specific types are in `api/v1/kubevirt_types.go` and `api/v1/proxmox_types.go`.
 Constants (finalizer name, label keys) are in `api/v1/constants.go`.
 
-Provider identification: KubeVirt uses `KubeVirtConfig.Name` (VM name), Proxmox uses `ProxmoxConfig.VMID` (integer). See `SPEC.md §9.6–9.7`.
+Provider identification: KubeVirt uses `KubeVirtConfig.Name` (VM name), Proxmox uses `ProxmoxConfig.VMID` (integer). See `docs/SPEC.md §9.6–9.7`.
 
 ### Controllers
 
-See `SPEC.md §7` for full reconcile flows and the internal vbash script template.
+See `docs/SPEC.md §7` for full reconcile flows and the internal vbash script template.
 
 All controllers follow the same pattern in `Reconcile()`: check `DeletionTimestamp` → `onDelete`; ensure finalizer → `onChange`. Both helpers have signature `(ctx, req, obj) (Result, error)`.
 
@@ -87,7 +89,7 @@ All controllers follow the same pattern in `Reconcile()`: check `DeletionTimesta
 
 Webhooks are disabled when `ENABLE_WEBHOOKS=false` (env var, checked in `cmd/main.go`).
 Cross-field validation (provider type vs sub-config presence) is in `internal/webhook/v1/validation.go`.
-Defaulting webhooks are no-ops; field defaults use `+kubebuilder:default=` markers. See `SPEC.md §6`.
+Defaulting webhooks are no-ops; field defaults use `+kubebuilder:default=` markers. See `docs/SPEC.md §6`.
 
 ### Code generation
 

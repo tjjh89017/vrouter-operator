@@ -2,23 +2,25 @@
 
 Items here are design proposals and planned features. Do not implement unless explicitly instructed.
 
+For detailed proposals, see [proposals/](proposals/).
+
 ---
 
 ## VRouterTarget Health Probe
 
 **Goal**: Detect when a target VM goes down and recovers, then automatically re-trigger reconciliation of related VRouterConfigs so config is re-applied after recovery.
 
-### New: VRouterTarget Status
+> Note: `VRouterTarget` already has `+kubebuilder:subresource:status` and a status struct with `ProxmoxNode` and `LastRebootTime`. The Health Probe would add `Health`, `Message`, `LastProbeTime`, and `LastTransitionTime` fields to the existing status.
 
-Add `//+kubebuilder:subresource:status` and a status struct:
+### New Fields on VRouterTargetStatus
 
 ```go
-//+kubebuilder:object:root=true
-//+kubebuilder:subresource:status
-//+kubebuilder:printcolumn:name="Health",type=string,JSONPath=`.status.health`
-type VRouterTarget struct { ... }
-
 type VRouterTargetStatus struct {
+    // existing fields
+    ProxmoxNode    string       `json:"proxmoxNode,omitempty"`
+    LastRebootTime *metav1.Time `json:"lastRebootTime,omitempty"`
+
+    // new fields for Health Probe
     // +kubebuilder:validation:Enum=Healthy;Unhealthy;Unknown
     // +kubebuilder:default=Unknown
     Health string `json:"health,omitempty"`
@@ -98,7 +100,7 @@ BindingController already watches VRouterTarget and will re-reconcile on health 
 
 ---
 
-### Open Design Questions
+## Open Design Questions
 
 1. **QGA ping vs VMI phase**: VMI Running does not guarantee QGA is responsive (boot window). Option: use VMI phase as proxy; let VRouterController's natural failure → Failed handle the transient window. QGA-level ping adds complexity.
 
