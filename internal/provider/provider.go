@@ -27,6 +27,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	vrouterv1 "github.com/tjjh89017/vrouter-operator/api/v1"
+	"github.com/tjjh89017/vrouter-operator/internal/provider/daemon"
 	"github.com/tjjh89017/vrouter-operator/internal/provider/kubevirt"
 	"github.com/tjjh89017/vrouter-operator/internal/provider/proxmox"
 	"github.com/tjjh89017/vrouter-operator/internal/provider/types"
@@ -66,6 +67,12 @@ func New(ctx context.Context, target *vrouterv1.VRouterTarget, cl client.Client,
 			return nil, err
 		}
 		return proxmox.New(ctx, cfg.Proxmox, cluster, target.Status.ProxmoxNode, cl)
+
+	case vrouterv1.ProviderVRouterDaemon:
+		if cfg.Daemon == nil {
+			return nil, fmt.Errorf("provider.daemon must be set when type is vrouter-daemon")
+		}
+		return daemon.New(cfg.Daemon)
 
 	default: // kubevirt (default)
 		if cfg.KubeVirt == nil {
