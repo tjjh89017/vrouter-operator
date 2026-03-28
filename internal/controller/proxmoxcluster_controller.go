@@ -117,9 +117,10 @@ func (r *ProxmoxClusterReconciler) onChange(ctx context.Context, _ ctrl.Request,
 	// Query Proxmox cluster resources.
 	vmMap, err := r.fetchClusterResources(ctx, cluster, tokenID, tokenSecret)
 	if err != nil {
-		log.Error(err, "failed to fetch cluster resources")
+		log.Info("Proxmox unreachable, marking all targets as stopped", "reason", err.Error())
 		r.setSyncedCondition(ctx, cluster, metav1.ConditionFalse, "FetchFailed", err.Error())
-		return ctrl.Result{}, err
+		r.markTargetsStopped(ctx, cluster)
+		return ctrl.Result{RequeueAfter: syncInterval}, nil
 	}
 
 	// List matching VRouterTargets and update their status.
@@ -350,6 +351,38 @@ func (r *ProxmoxClusterReconciler) fetchGuestUptime(ctx context.Context, cluster
 		}
 	}
 	return 0, fmt.Errorf("timeout waiting for guest uptime exec")
+}
+
+// markTargetsStopped sets VMRunning=false on all VRouterTargets referencing this cluster.
+func (r *ProxmoxClusterReconciler) markTargetsStopped(ctx context.Context, cluster *vrouterv1.ProxmoxCluster) {
+	log := logf.FromContext(ctx)
+	var targetList vrouterv1.VRouterTargetList
+	if err := r.List(ctx, &targetList, client.InNamespace(cluster.Namespace)); err != nil {
+		log.Error(err, "list VRouterTargets for markTargetsStopped")
+		return
+	}
+	for i := range targetList.Items {
+		t := &targetList.Items[i]
+		if t.Spec.Provider.Type != vrouterv1.ProviderProxmox || t.Spec.Provider.Proxmox == nil {
+			continue
+		}
+		ref := t.Spec.Provider.Proxmox.ClusterRef
+		refNS := ref.Namespace
+		if refNS == "" {
+			refNS = t.Namespace
+		}
+		if refNS != cluster.Namespace || ref.Name != cluster.Name {
+			continue
+		}
+		if !t.Status.VMRunning {
+			continue
+		}
+		patch := client.MergeFrom(t.DeepCopy())
+		t.Status.VMRunning = false
+		if err := r.Status().Patch(ctx, t, patch); err != nil {
+			log.Error(err, "patch VRouterTarget VMRunning=false", "target", t.Name)
+		}
+	}
 }
 
 // setSyncedCondition patches the cluster status with a Synced condition.
