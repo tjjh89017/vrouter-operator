@@ -1,13 +1,13 @@
 module github.com/tjjh89017/vrouter-operator
 
-go 1.26.1
+go 1.25.0
 
 require (
 	dario.cat/mergo v1.0.2
 	github.com/Masterminds/sprig/v3 v3.3.0
 	github.com/onsi/ginkgo/v2 v2.27.2
 	github.com/onsi/gomega v1.38.2
-	github.com/tjjh89017/vrouter-daemon v0.0.0-20260328094223-27d3e5cc5f9e
+	github.com/tjjh89017/vrouter-daemon v0.0.0-20260328100753-4794fa0e5c03
 	google.golang.org/grpc v1.79.3
 	k8s.io/api v0.35.2
 	k8s.io/apiextensions-apiserver v0.35.2

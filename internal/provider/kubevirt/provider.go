@@ -132,32 +132,36 @@ func (p *Provider) CheckReady(ctx context.Context) error {
 	}
 }
 
-// WriteFile writes the apply script content to the router via QGA file operations.
-func (p *Provider) WriteFile(ctx context.Context, content []byte) error {
+// ExecScript renders the vbash apply script, writes it to the router via QGA,
+// and executes it asynchronously. Returns the guest-exec PID for polling.
+func (p *Provider) ExecScript(ctx context.Context, config, commands string, save bool) (int64, error) {
+	content, err := qga.RenderScript(config, commands, save)
+	if err != nil {
+		return 0, fmt.Errorf("render script: %w", err)
+	}
+
+	// Write script to router via QGA file operations.
 	openResp, err := p.runQGA(ctx, fmt.Sprintf(qga.CmdFileOpen, qga.ScriptPath))
 	if err != nil {
-		return fmt.Errorf("guest-file-open: %w", err)
+		return 0, fmt.Errorf("guest-file-open: %w", err)
 	}
 	var openResult struct {
 		Return int64 `json:"return"`
 	}
 	if err := json.Unmarshal([]byte(openResp), &openResult); err != nil {
-		return fmt.Errorf("guest-file-open parse: %w", err)
+		return 0, fmt.Errorf("guest-file-open parse: %w", err)
 	}
 	handle := openResult.Return
 
 	b64 := base64.StdEncoding.EncodeToString(content)
 	if _, err := p.runQGA(ctx, fmt.Sprintf(qga.CmdFileWrite, handle, b64)); err != nil {
-		return fmt.Errorf("guest-file-write: %w", err)
+		return 0, fmt.Errorf("guest-file-write: %w", err)
 	}
 	if _, err := p.runQGA(ctx, fmt.Sprintf(qga.CmdFileClose, handle)); err != nil {
-		return fmt.Errorf("guest-file-close: %w", err)
+		return 0, fmt.Errorf("guest-file-close: %w", err)
 	}
-	return nil
-}
 
-// ExecScript executes the apply script asynchronously via QGA guest-exec, returns PID.
-func (p *Provider) ExecScript(ctx context.Context) (int64, error) {
+	// Execute the script asynchronously, capturing output.
 	resp, err := p.runQGA(ctx, fmt.Sprintf(qga.CmdExecScript, qga.ScriptPath))
 	if err != nil {
 		return 0, fmt.Errorf("guest-exec: %w", err)

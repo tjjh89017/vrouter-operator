@@ -246,19 +246,20 @@ func (p *Provider) CheckReady(ctx context.Context) error {
 	}
 }
 
-// WriteFile writes the apply script content to the router via the Proxmox file-write agent endpoint.
-func (p *Provider) WriteFile(ctx context.Context, content []byte) error {
-	node, err := p.resolveNode(ctx)
+// ExecScript renders the vbash apply script, writes it to the router via the
+// Proxmox agent file-write endpoint, and executes it asynchronously via agent exec.
+// Returns the PID for polling via GetExecStatus.
+func (p *Provider) ExecScript(ctx context.Context, config, commands string, save bool) (int64, error) {
+	content, err := qga.RenderScript(config, commands, save)
 	if err != nil {
-		return err
+		return 0, fmt.Errorf("render script: %w", err)
 	}
-	return p.agentFileWrite(ctx, node, qga.ScriptPath, content)
-}
 
-// ExecScript executes the apply script asynchronously via agent exec, returns PID.
-func (p *Provider) ExecScript(ctx context.Context) (int64, error) {
 	node, err := p.resolveNode(ctx)
 	if err != nil {
+		return 0, err
+	}
+	if err := p.agentFileWrite(ctx, node, qga.ScriptPath, content); err != nil {
 		return 0, err
 	}
 	return p.agentExec(ctx, node, []string{"/bin/vbash", qga.ScriptPath})

@@ -36,10 +36,11 @@ type Provider interface {
 	// CheckReady verifies the router is reachable and ready to accept config
 	// (QGA ping + vyos-router.service is-active).
 	CheckReady(ctx context.Context) error
-	// WriteFile writes the apply script content to the router via guest agent.
-	WriteFile(ctx context.Context, content []byte) error
-	// ExecScript executes the apply script asynchronously, returns PID for tracking.
-	ExecScript(ctx context.Context) (pid int64, err error)
-	// GetExecStatus polls the result of a previously started script.
-	GetExecStatus(ctx context.Context, pid int64) (*ExecStatus, error)
+	// ExecScript renders and applies the given VyOS config asynchronously.
+	// config is a VyOS config block, commands is a list of configure-mode commands,
+	// save controls whether the running config is persisted to disk after commit.
+	// Returns a provider-specific handle (e.g. PID) for polling via GetExecStatus.
+	ExecScript(ctx context.Context, config, commands string, save bool) (handle int64, err error)
+	// GetExecStatus polls the result of a previously started ExecScript call.
+	GetExecStatus(ctx context.Context, handle int64) (*ExecStatus, error)
 }
