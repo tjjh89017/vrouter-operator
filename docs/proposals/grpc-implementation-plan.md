@@ -2,206 +2,277 @@
 
 ## Context
 
-The vrouter-operator currently pushes configuration to VyOS routers inside VMs via QGA (KubeVirt SPDY / Proxmox REST). To support bare metal VyOS routers with no hypervisor-level management channel, a gRPC agent mechanism is needed: the operator pushes config to a gRPC server, and agents connect to pull and apply configurations.
+The vrouter-operator currently pushes configuration to VyOS routers inside VMs via QGA (KubeVirt SPDY / Proxmox REST). To support bare metal VyOS routers, a standalone daemon service is needed: the daemon manages agent connections and exposes a control API, while the operator calls that API through a provider adapter.
 
 Design reference: `docs/proposals/grpc-agent-architecture.md`
 
 **Key decisions:**
-- **Adapter pattern**: The gRPC provider implements the existing `Provider` interface so the controller requires no changes.
-- **Separate repository**: gRPC server and client live in the `vrouter-daemon` repo. No git submodules — both repos sit side-by-side in the same parent directory.
-- **Go module dependency**: The operator imports `vrouter-daemon/pkg/...` via `go.mod`.
-- **Three binaries**: `vrouter-server` (server only), `vrouter-agent` (agent only), `vrouter-daemon` (mixed mode — both server and agent in one process).
+- **API isolation**: The operator and daemon are fully decoupled. No shared Go imports. The wire protocol (proto file) is the only contract.
+- **Separate repository**: `vrouter-daemon` is an independently operable service.
+- **Adapter pattern**: The operator implements a `grpc` provider that calls the server's control API.
+- **Three binaries**: `vrouter-server` (server only), `vrouter-agent` (agent only), `vrouter-daemon` (mixed mode).
+- **Two gRPC services in the daemon**:
+  - **ControlService** (operator-facing): unary RPCs for config push, status query
+  - **AgentService** (agent-facing): bidirectional streaming for agent connections
 
 ---
 
-## Part A: vrouter-daemon Repository (New Repo)
+## Architecture
 
-### Phase A1: Proto Definitions + gRPC Server Core
+```
+vrouter-operator process               vrouter-daemon process
+┌──────────────────────┐               ┌──────────────────────────────┐
+│  VRouterConfig       │               │  ControlService (port 50052) │
+│  Controller          │   gRPC        │         │                    │
+│       │              │──────────────→│  ┌──────▼──────┐             │
+│  ┌────▼────────┐     │               │  │  Registry +  │             │
+│  │ gRPC Client │     │               │  │  Dispatcher  │             │
+│  │ (internal/) │     │               │  └──────┬──────┘             │
+│  └─────────────┘     │               │         │                    │
+└──────────────────────┘               │  ┌──────▼──────┐             │
+                                       │  │ AgentService │             │
+                                       │  │ (port 50051) │             │
+                                       │  └──────┬──────┘             │
+                                       └─────────│────────────────────┘
+                                                 │ gRPC bidir stream
+                                           VyOS agents
+```
 
-**Goal**: Scaffold the repository, define the protobuf service, and implement the core gRPC server (connection management, agent registration, message routing).
+**Two separate ports with different network policies:**
+- Port 50051 (agent-facing): exposed via LoadBalancer/NodePort for external agents
+- Port 50052 (operator-facing): ClusterIP only, internal to the cluster
+
+---
+
+## Proto Definitions
+
+### `proto/control/v1/control.proto` (operator-facing)
+
+```protobuf
+syntax = "proto3";
+package vrouter.control.v1;
+
+service ControlService {
+  rpc IsConnected(IsConnectedRequest) returns (IsConnectedResponse) {}
+  rpc GetStatus(GetStatusRequest) returns (GetStatusResponse) {}
+  rpc ApplyConfig(ApplyConfigRequest) returns (ApplyConfigResponse) {}
+}
+
+message IsConnectedRequest { string agent_id = 1; }
+message IsConnectedResponse { bool connected = 1; }
+
+message GetStatusRequest { string agent_id = 1; }
+message GetStatusResponse {
+  bool   has_status = 1;
+  bytes  status_json = 2;
+  string agent_version = 3;
+}
+
+message ApplyConfigRequest {
+  string agent_id = 1;
+  bytes  config_payload = 2;
+  int32  timeout_seconds = 3;
+}
+
+message ApplyConfigResponse {
+  bool   success = 1;
+  int32  exit_code = 2;
+  string stdout = 3;
+  string stderr = 4;
+  string error_message = 5;
+}
+```
+
+### `proto/agent/v1/agent.proto` (agent-facing)
+
+```protobuf
+syntax = "proto3";
+package vrouter.agent.v1;
+
+service AgentService {
+  rpc Connect(stream AgentMessage) returns (stream ServerMessage) {}
+}
+
+message AgentMessage { string type = 1; bytes payload = 2; }
+message ServerMessage { string type = 1; string id = 2; bytes payload = 3; }
+```
+
+### API Contract Sharing
+
+The proto files are maintained in `vrouter-daemon` as the source of truth. The operator copies `control.proto` and generates its own Go stubs. CI can verify the copies stay in sync.
+
+---
+
+## Part A: vrouter-daemon Repository
+
+### Repository Structure
+
+Everything under `internal/` — no external Go consumers.
+
+```
+vrouter-daemon/
+├── proto/
+│   ├── control/v1/control.proto     # operator-facing API (source of truth)
+│   └── agent/v1/agent.proto         # agent-facing API
+├── gen/go/
+│   ├── controlpb/                   # generated from control.proto
+│   └── agentpb/                     # generated from agent.proto
+├── internal/
+│   ├── controlapi/                  # ControlService gRPC handler
+│   │   ├── service.go
+│   │   └── service_test.go
+│   ├── agentapi/                    # AgentService gRPC handler (bidir streams)
+│   │   ├── service.go
+│   │   └── service_test.go
+│   ├── registry/                    # agent connection registry
+│   │   ├── registry.go              # agentID → stream, thread-safe
+│   │   └── registry_test.go
+│   ├── dispatch/                    # request-response correlation
+│   │   ├── dispatcher.go            # send to agent, wait for ack, timeout
+│   │   └── dispatcher_test.go
+│   └── config/                      # server configuration (flags, env)
+│       └── config.go
+├── cmd/
+│   ├── vrouter-server/main.go       # server only binary
+│   ├── vrouter-agent/main.go        # agent only binary
+│   └── vrouter-daemon/main.go       # mixed mode (server + agent)
+├── agent/                           # Python VyOS agent (future)
+├── Makefile
+├── go.mod
+└── go.sum
+```
+
+### Phase A1: Proto + Server Core
+
+**Goal**: Scaffold repo, define both proto files, implement server internals.
 
 **Deliverables:**
 
-1. Repository scaffold: `github.com/tjjh89017/vrouter-daemon`
-   ```
-   vrouter-daemon/
-   ├── proto/agent.proto
-   ├── gen/go/                    # protoc-generated Go code
-   ├── pkg/
-   │   ├── server/               # server library (imported by vrouter-operator)
-   │   │   ├── server.go         # gRPC server, Connect handler
-   │   │   ├── registry.go       # Agent registry (sync.Map)
-   │   │   └── pool.go           # AgentPool interface + in-memory implementation
-   │   └── agent/                # agent library
-   │       └── client.go         # gRPC client, message handling
-   ├── cmd/
-   │   ├── vrouter-server/main.go  # server only binary
-   │   ├── vrouter-agent/main.go     # agent only binary
-   │   └── vrouter-daemon/main.go   # mixed mode binary (future)
-   ├── Makefile                    # proto generate, build
-   └── go.mod
-   ```
+1. Proto definitions: `control.proto` + `agent.proto`, code generation via Makefile
+2. `internal/registry/`: agent connection registry (sync.RWMutex map, Register/Deregister/IsConnected/GetStream)
+3. `internal/dispatch/`: request-response correlation (send `apply_config` to agent stream, block until `config_ack` or timeout)
+4. `internal/agentapi/`: AgentService handler — read `register`, store in registry, pump messages, notify dispatcher on `config_ack`
+5. `internal/controlapi/`: ControlService handler — delegates to registry and dispatcher
+6. `cmd/vrouter-server/main.go`: starts both gRPC services on two ports
 
-2. `proto/agent.proto`:
-   ```protobuf
-   service AgentService {
-     rpc Connect(stream AgentMessage) returns (stream ServerMessage) {}
-   }
-   message AgentMessage { string type = 1; bytes payload = 2; }
-   message ServerMessage { string type = 1; string id = 2; bytes payload = 3; }
-   ```
+**Verification**: `go test ./internal/...`
 
-3. `pkg/server/pool.go` — AgentPool interface:
-   ```go
-   type AgentPool interface {
-       ApplyConfig(ctx context.Context, agentID string, payload []byte) (*ConfigResult, error)
-       GetStatus(agentID string) (*AgentStatus, error)
-       IsConnected(agentID string) bool
-   }
-   ```
+### Phase A2: Go Agent + E2E Validation
 
-4. Server core functionality:
-   - Agent registry (concurrent map: agentID → stream)
-   - Connect handler: read first `register` message, store in registry, pump messages
-   - Request correlation: `apply_config` carries a UUID `id`, blocks until matching `config_ack`
-   - Heartbeat / keepalive configuration
-   - Clean removal from registry on stream close
-
-5. Binaries:
-   - `vrouter-server`: standalone gRPC server binary (`cmd/vrouter-server/main.go`)
-   - `vrouter-agent`: standalone agent binary (`cmd/vrouter-agent/main.go`)
-   - `vrouter-daemon`: mixed mode binary — runs both server and agent in one process (`cmd/vrouter-daemon/main.go`)
-
-**Verification**: Unit tests for mock streams, registration, and ApplyConfig correlation.
-
-### Phase A2: Go Test Agent + E2E Validation
-
-**Goal**: Build a minimal Go-based test agent to validate the full protocol end-to-end.
+**Goal**: Build the Go agent binary, validate full protocol end-to-end.
 
 **Deliverables:**
 
-1. `cmd/vrouter-agent/main.go` (extend with test/debug capabilities):
-   - Connect to server, send `register`
-   - Receive `apply_config` → respond with `config_ack`
-   - Send periodic `status` messages
-
-2. E2E tests:
-   - Start `vrouter-server` + `vrouter-agent`
-   - Call `AgentPool.ApplyConfig()` and assert success
-   - Test agent disconnect / reconnect
-   - Test `ApplyConfig` timeout (agent does not respond)
-   - Concurrency test (multiple agents connected simultaneously)
-
-3. Error handling hardening:
-   - Context cancellation propagation
+1. `internal/agent/`: agent client library (connect, register, handle messages, reconnect)
+2. `cmd/vrouter-agent/main.go`: standalone agent binary
+3. `cmd/vrouter-daemon/main.go`: mixed mode binary (server + agent in one process)
+4. E2E tests:
+   - Start server + agent, call ControlService.ApplyConfig, verify success
+   - Agent disconnect / reconnect
+   - ApplyConfig timeout (agent unresponsive)
+   - Concurrent multiple agents
    - Duplicate agentID handling
    - Graceful shutdown
 
-**Verification**: All E2E integration tests pass.
+**Verification**: E2E integration tests pass.
 
 ### Phase A3: Python VyOS Agent
 
-**Goal**: Production agent that runs on bare metal VyOS routers.
+**Goal**: Production agent for bare metal VyOS routers.
 
 **Deliverables:**
 
-1. `agent/` (Python, separate from Go cmd/):
-   - gRPC client using `grpcio`
-   - `apply_config` handler:
-     - Load init config from `/config/vrouter-agent/init-config.txt`
-     - Merge: init config takes precedence on conflicts
-     - Apply via `commit-confirm` (60s timeout)
-     - Connectivity check → confirm or let auto-rollback expire
-   - `get_status` handler: read interface/route/BGP state
-   - Automatic reconnect with exponential backoff
-   - Periodic status reporting
-
+1. `agent/` (Python): grpcio client, init config merge, commit-confirm, auto-reconnect
 2. Configuration: `--server`, `--agent-id`, `--init-config`, `--backend vyos`
-3. Systemd service file
-4. Setup documentation
+3. Systemd service file + setup documentation
 
-**Verification**: Unit tests for init config merge logic; integration test against the Go server.
+**Verification**: Unit tests for init config merge; integration test against Go server.
 
 ---
 
 ## Part B: vrouter-operator Integration (This Repo)
 
-### Phase B1: API Types + Webhook (Can start after Phase A1)
+### Phase B1: API Types + Webhook
 
-**Goal**: Add the `grpc` provider type, extend the CRD schema and validation.
+**Goal**: Add `grpc` provider type to CRD schema and validation.
 
 **Files to modify:**
 
-- `api/v1/grpc_types.go` (new file):
+- `api/v1/grpc_types.go` (new):
   ```go
-  const ProviderGRPCAgent ProviderType = "grpc"
-  type GRPCAgentConfig struct {
+  const ProviderGRPC ProviderType = "grpc"
+  type GRPCConfig struct {
       AgentID string `json:"agentID"`
   }
   ```
 
 - `api/v1/shared_types.go`:
-  - Add `grpc` to the `ProviderType` enum
-  - Add `GRPCAgent *GRPCAgentConfig` field to `ProviderConfig`
+  - Add `grpc` to `ProviderType` enum
+  - Add `GRPC *GRPCConfig` field to `ProviderConfig`
 
 - `internal/webhook/v1/validation.go`:
-  - Add `case vrouterv1.ProviderGRPCAgent:` validating `GRPCAgent != nil` and `AgentID != ""`
+  - Add `case vrouterv1.ProviderGRPC:` validating `GRPC != nil` and `AgentID != ""`
 
 - Run `make generate && make manifests`
 
-**Verification**: Webhook unit tests pass; `make test` passes.
+**Verification**: `make test`
 
-### Phase B2: gRPC Provider Adapter (Can start after Phase A1)
+### Phase B2: gRPC Provider Adapter
 
-**Goal**: Implement a gRPC provider that satisfies the existing `Provider` interface.
+**Goal**: Implement the gRPC provider that calls the vrouter-daemon ControlService.
 
-**New files:**
+**New files under `internal/provider/grpc/`:**
 
-- `internal/provider/grpc/provider.go`:
+- `client.go` — gRPC client wrapping the generated ControlService stubs:
   ```go
-  type Provider struct {
-      agentID    string
-      pool       AgentPool     // imported from vrouter-daemon
-      configBuf  []byte        // buffered by WriteFile
-      lastResult *ConfigResult // stored by ExecScript
+  type Client struct {
+      pb controlpb.ControlServiceClient
   }
+
+  func (c *Client) IsConnected(ctx context.Context, agentID string) (bool, error) { ... }
+  func (c *Client) GetStatus(ctx context.Context, agentID string) (*AgentStatus, error) { ... }
+  func (c *Client) ApplyConfig(ctx context.Context, agentID string, payload []byte, timeoutSec int) (*ApplyResult, error) { ... }
   ```
-  - `IsVMRunning` → `pool.IsConnected(agentID)`
-  - `CheckReady` → `pool.IsConnected(agentID)` + `pool.GetStatus(agentID)` to confirm agent readiness
-  - `WriteFile` → buffer content into `configBuf`
-  - `ExecScript` → call `pool.ApplyConfig(agentID, configBuf)`, store result in `lastResult`, return synthetic PID
-  - `GetExecStatus` → convert `lastResult` to `ExecStatus{Exited: true, ExitCode: ...}`
 
-- `internal/provider/provider.go`:
-  - Add `case vrouterv1.ProviderGRPCAgent:` to the factory to construct the gRPC provider
+- `provider.go` — Provider adapter:
+  - `IsVMRunning` → `client.IsConnected(agentID)`
+  - `CheckReady` → `client.IsConnected(agentID)` + `client.GetStatus(agentID)`
+  - `WriteFile` → buffer content
+  - `ExecScript` → `client.ApplyConfig(agentID, buffered)`, store result, return synthetic PID
+  - `GetExecStatus` → return stored result as `ExecStatus{Exited: true, ...}`
 
-**Verification**: Unit tests with a mock AgentPool; verify adapter behavior.
+- `proto/control.proto` — copied from vrouter-daemon (source of truth)
+- `gen/controlpb/` — generated Go stubs
+
+- `internal/provider/provider.go`: add `case vrouterv1.ProviderGRPC:` to factory
+
+If a different transport is needed in the future, add a new provider (e.g. `internal/provider/rest/`).
+
+**Verification**: `go test ./internal/provider/grpc/...` with mock gRPC server
 
 ### Phase B3: Manager Wiring + Integration Tests
 
-**Goal**: Start the gRPC server within the operator process and wire the AgentPool into the provider factory.
+**Goal**: Wire the gRPC provider into the operator startup.
 
 **Files to modify:**
 
-- `go.mod`: Add `github.com/tjjh89017/vrouter-daemon` dependency
 - `cmd/main.go`:
-  - Create gRPC server + AgentPool (in-memory, same process)
-  - Register as `manager.Runnable` via `mgr.Add()` (participates in leader election + graceful shutdown)
-  - Add flag `--grpc-listen-address` (default `:50051`)
-  - Pass AgentPool to the provider factory (or inject globally)
+  - Add flag `--daemon-address` (e.g. `vrouter-daemon.vrouter-system.svc:50052`)
+  - Create gRPC connection + gRPC client at startup
+  - Pass client to provider factory
 
-- `internal/provider/provider.go`: `New()` accepts an AgentPool parameter
+- `internal/provider/provider.go`: `New()` accepts optional gRPC client parameter
 
-**Verification**: envtest integration tests (VRouterTarget type=grpc → create VRouterConfig → mock AgentPool → verify reconcile).
+**Verification**: envtest integration test with mock gRPC server; `make test` passes.
 
 ---
 
 ## Phase Dependency Graph
 
 ```
-Phase A1 (proto + server)
+Phase A1 (proto + server core)
     │
-    ├──→ Phase A2 (test agent + E2E)
+    ├──→ Phase A2 (Go agent + E2E)
     │        │
     │        └──→ Phase A3 (Python agent)
     │
@@ -212,10 +283,10 @@ Phase A1 (proto + server)
               └──→ Phase B3 (manager wiring)
 ```
 
-- A1 is the foundation for everything
-- A2, B1, and B2 can proceed in parallel after A1 is complete
-- A3 depends on A2 (requires a validated protocol)
-- B3 depends on B1 + B2 (requires both API types and the provider adapter)
+- A1 is the foundation
+- A2, B1, B2 can proceed in parallel after A1
+- A3 depends on A2
+- B3 depends on B1 + B2
 
 ---
 
@@ -223,12 +294,12 @@ Phase A1 (proto + server)
 
 | Phase | Verification |
 |-------|-------------|
-| A1 | `go test ./pkg/server/...` |
-| A2 | E2E integration tests (start vrouter-server + vrouter-agent) |
-| A3 | Unit tests + integration tests against the Go server |
+| A1 | `go test ./internal/...` |
+| A2 | E2E integration tests (vrouter-server + vrouter-agent) |
+| A3 | Unit tests + integration tests against Go server |
 | B1 | `make test` (webhook tests) |
 | B2 | `go test ./internal/provider/grpc/...` |
-| B3 | `make test` (full envtest suite), manual run with `ENABLE_WEBHOOKS=false go run ./cmd/main.go --grpc-listen-address=:50051` |
+| B3 | `make test` (full envtest suite) |
 
 ---
 
@@ -237,31 +308,40 @@ Phase A1 (proto + server)
 **New repo**: `github.com/tjjh89017/vrouter-daemon`
 
 **Binaries** (three binaries from the same repo):
-- `vrouter-server` — server only, runs in Kubernetes alongside the operator
+- `vrouter-server` — server only, runs in Kubernetes
 - `vrouter-agent` — agent only, runs on bare metal VyOS routers
-- `vrouter-daemon` — mixed mode (server + agent in one process), useful for dev/testing or single-node setups
+- `vrouter-daemon` — mixed mode (server + agent in one process)
 
 Local development directory layout (side-by-side):
 ```
 ~/git/
 ├── vrouter-operator/    # this repo
-└── vrouter-daemon/       # new repo
+└── vrouter-daemon/      # new repo
 ```
 
-Go module reference (in vrouter-operator's go.mod):
-```
-require github.com/tjjh89017/vrouter-daemon v0.1.0
-```
+No Go module dependency between repos. The only shared artifact is `control.proto`.
 
-During development, use a `replace` directive to point to the local path:
+---
+
+## Deployment
+
 ```
-replace github.com/tjjh89017/vrouter-daemon => ../vrouter-daemon
+Namespace: vrouter-system
+
+Deployment: vrouter-operator        (1 replica, leader-elected)
+  --daemon-address=vrouter-daemon.vrouter-system.svc:50052
+
+Deployment: vrouter-daemon          (1+ replicas)
+  Port 50051: agent-facing (AgentService) → LoadBalancer/NodePort
+  Port 50052: operator-facing (ControlService) → ClusterIP
+
+Service: vrouter-daemon             (ClusterIP, port 50052)
+Service: vrouter-daemon-agents      (LoadBalancer, port 50051)
 ```
 
 ---
 
 ## Next Steps
 
-1. Create the `vrouter-daemon` git repository
-2. Start with Phase A1 (proto + gRPC server)
-3. After A1 is complete, begin Phase B1 + B2 in the operator repo
+1. Start Phase A1 in the `vrouter-daemon` repo
+2. After A1, begin B1 + B2 in parallel in the operator repo
