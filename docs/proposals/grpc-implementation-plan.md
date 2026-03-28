@@ -8,12 +8,13 @@ Design reference: `docs/proposals/grpc-agent-architecture.md`
 
 **Key decisions:**
 - **Adapter pattern**: The gRPC provider implements the existing `Provider` interface so the controller requires no changes.
-- **Separate repository**: gRPC server and client live in the `vrouter-agent` repo. No git submodules — both repos sit side-by-side in the same parent directory.
-- **Go module dependency**: The operator imports `vrouter-agent/pkg/...` via `go.mod`.
+- **Separate repository**: gRPC server and client live in the `vrouter-daemon` repo. No git submodules — both repos sit side-by-side in the same parent directory.
+- **Go module dependency**: The operator imports `vrouter-daemon/pkg/...` via `go.mod`.
+- **Three binaries**: `vrouter-server` (server only), `vrouter-agent` (agent only), `vrouter-daemon` (mixed mode — both server and agent in one process).
 
 ---
 
-## Part A: vrouter-agent Repository (New Repo)
+## Part A: vrouter-daemon Repository (New Repo)
 
 ### Phase A1: Proto Definitions + gRPC Server Core
 
@@ -21,19 +22,23 @@ Design reference: `docs/proposals/grpc-agent-architecture.md`
 
 **Deliverables:**
 
-1. Repository scaffold: `github.com/tjjh89017/vrouter-agent`
+1. Repository scaffold: `github.com/tjjh89017/vrouter-daemon`
    ```
-   vrouter-agent/
+   vrouter-daemon/
    ├── proto/agent.proto
-   ├── gen/go/             # protoc-generated Go code
+   ├── gen/go/                    # protoc-generated Go code
    ├── pkg/
-   │   └── grpcserver/
-   │       ├── server.go   # gRPC server, Connect handler
-   │       ├── registry.go # Agent registry (sync.Map)
-   │       └── pool.go     # AgentPool interface + in-memory implementation
+   │   ├── server/               # server library (imported by vrouter-operator)
+   │   │   ├── server.go         # gRPC server, Connect handler
+   │   │   ├── registry.go       # Agent registry (sync.Map)
+   │   │   └── pool.go           # AgentPool interface + in-memory implementation
+   │   └── agent/                # agent library
+   │       └── client.go         # gRPC client, message handling
    ├── cmd/
-   │   └── server/main.go  # Standalone server binary
-   ├── Makefile             # proto generate, build
+   │   ├── vrouter-server/main.go  # server only binary
+   │   ├── vrouter-agent/main.go     # agent only binary
+   │   └── vrouter-daemon/main.go   # mixed mode binary (future)
+   ├── Makefile                    # proto generate, build
    └── go.mod
    ```
 
@@ -46,7 +51,7 @@ Design reference: `docs/proposals/grpc-agent-architecture.md`
    message ServerMessage { string type = 1; string id = 2; bytes payload = 3; }
    ```
 
-3. `pkg/grpcserver/pool.go` — AgentPool interface:
+3. `pkg/server/pool.go` — AgentPool interface:
    ```go
    type AgentPool interface {
        ApplyConfig(ctx context.Context, agentID string, payload []byte) (*ConfigResult, error)
@@ -62,6 +67,11 @@ Design reference: `docs/proposals/grpc-agent-architecture.md`
    - Heartbeat / keepalive configuration
    - Clean removal from registry on stream close
 
+5. Binaries:
+   - `vrouter-server`: standalone gRPC server binary (`cmd/vrouter-server/main.go`)
+   - `vrouter-agent`: standalone agent binary (`cmd/vrouter-agent/main.go`)
+   - `vrouter-daemon`: mixed mode binary — runs both server and agent in one process (`cmd/vrouter-daemon/main.go`)
+
 **Verification**: Unit tests for mock streams, registration, and ApplyConfig correlation.
 
 ### Phase A2: Go Test Agent + E2E Validation
@@ -70,13 +80,13 @@ Design reference: `docs/proposals/grpc-agent-architecture.md`
 
 **Deliverables:**
 
-1. `cmd/testagent/main.go`:
+1. `cmd/vrouter-agent/main.go` (extend with test/debug capabilities):
    - Connect to server, send `register`
    - Receive `apply_config` → respond with `config_ack`
    - Send periodic `status` messages
 
 2. E2E tests:
-   - Start server + test agent
+   - Start `vrouter-server` + `vrouter-agent`
    - Call `AgentPool.ApplyConfig()` and assert success
    - Test agent disconnect / reconnect
    - Test `ApplyConfig` timeout (agent does not respond)
@@ -95,7 +105,7 @@ Design reference: `docs/proposals/grpc-agent-architecture.md`
 
 **Deliverables:**
 
-1. `cmd/agent/` (Python):
+1. `agent/` (Python, separate from Go cmd/):
    - gRPC client using `grpcio`
    - `apply_config` handler:
      - Load init config from `/config/vrouter-agent/init-config.txt`
@@ -151,7 +161,7 @@ Design reference: `docs/proposals/grpc-agent-architecture.md`
   ```go
   type Provider struct {
       agentID    string
-      pool       AgentPool     // imported from vrouter-agent
+      pool       AgentPool     // imported from vrouter-daemon
       configBuf  []byte        // buffered by WriteFile
       lastResult *ConfigResult // stored by ExecScript
   }
@@ -173,7 +183,7 @@ Design reference: `docs/proposals/grpc-agent-architecture.md`
 
 **Files to modify:**
 
-- `go.mod`: Add `github.com/tjjh89017/vrouter-agent` dependency
+- `go.mod`: Add `github.com/tjjh89017/vrouter-daemon` dependency
 - `cmd/main.go`:
   - Create gRPC server + AgentPool (in-memory, same process)
   - Register as `manager.Runnable` via `mgr.Add()` (participates in leader election + graceful shutdown)
@@ -213,8 +223,8 @@ Phase A1 (proto + server)
 
 | Phase | Verification |
 |-------|-------------|
-| A1 | `go test ./pkg/grpcserver/...` |
-| A2 | E2E integration tests (start server + test agent) |
+| A1 | `go test ./pkg/server/...` |
+| A2 | E2E integration tests (start vrouter-server + vrouter-agent) |
 | A3 | Unit tests + integration tests against the Go server |
 | B1 | `make test` (webhook tests) |
 | B2 | `go test ./internal/provider/grpc/...` |
@@ -224,29 +234,34 @@ Phase A1 (proto + server)
 
 ## Repository Naming and Structure
 
-**New repo**: `github.com/tjjh89017/vrouter-agent`
+**New repo**: `github.com/tjjh89017/vrouter-daemon`
+
+**Binaries** (three binaries from the same repo):
+- `vrouter-server` — server only, runs in Kubernetes alongside the operator
+- `vrouter-agent` — agent only, runs on bare metal VyOS routers
+- `vrouter-daemon` — mixed mode (server + agent in one process), useful for dev/testing or single-node setups
 
 Local development directory layout (side-by-side):
 ```
 ~/git/
 ├── vrouter-operator/    # this repo
-└── vrouter-agent/       # new repo
+└── vrouter-daemon/       # new repo
 ```
 
 Go module reference (in vrouter-operator's go.mod):
 ```
-require github.com/tjjh89017/vrouter-agent v0.1.0
+require github.com/tjjh89017/vrouter-daemon v0.1.0
 ```
 
 During development, use a `replace` directive to point to the local path:
 ```
-replace github.com/tjjh89017/vrouter-agent => ../vrouter-agent
+replace github.com/tjjh89017/vrouter-daemon => ../vrouter-daemon
 ```
 
 ---
 
 ## Next Steps
 
-1. Create the `vrouter-agent` git repository
+1. Create the `vrouter-daemon` git repository
 2. Start with Phase A1 (proto + gRPC server)
 3. After A1 is complete, begin Phase B1 + B2 in the operator repo
