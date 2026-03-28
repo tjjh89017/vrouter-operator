@@ -20,6 +20,7 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -56,7 +57,6 @@ type Provider struct {
 	client         controlpb.ControlServiceClient
 	agentID        string
 	timeoutSeconds int32
-	scriptBuf      []byte // cached by WriteFile, consumed by ExecScript
 }
 
 // New creates a daemon Provider that connects to the ControlService at cfg.Address.
@@ -108,26 +108,25 @@ func (p *Provider) CheckReady(_ context.Context) error {
 	return nil
 }
 
-// WriteFile caches the script content for the subsequent ExecScript call.
-// The actual content is sent to the agent as part of ApplyConfig.
-func (p *Provider) WriteFile(_ context.Context, content []byte) error {
-	p.scriptBuf = make([]byte, len(content))
-	copy(p.scriptBuf, content)
-	return nil
+// configPayload is the JSON body expected by the daemon dispatcher.
+type configPayload struct {
+	Config   string `json:"config,omitempty"`
+	Commands string `json:"commands,omitempty"`
 }
 
-// ExecScript submits the cached script to the daemon via ApplyConfig in a
-// background goroutine and returns a fake PID for polling via GetExecStatus.
-func (p *Provider) ExecScript(_ context.Context) (int64, error) {
-	if len(p.scriptBuf) == 0 {
-		return 0, fmt.Errorf("no script content: WriteFile must be called before ExecScript")
+// ExecScript submits the raw VyOS config to the daemon via ApplyConfig in a
+// background goroutine and returns a fake handle for polling via GetExecStatus.
+// The daemon agent renders and executes the vbash script internally.
+func (p *Provider) ExecScript(_ context.Context, config, commands string, _ bool) (int64, error) {
+	payload, err := json.Marshal(configPayload{Config: config, Commands: commands})
+	if err != nil {
+		return 0, fmt.Errorf("marshal config payload: %w", err)
 	}
 
-	pid := atomic.AddInt64(&pidSeq, 1)
+	handle := atomic.AddInt64(&pidSeq, 1)
 	entry := &execEntry{done: make(chan struct{})}
-	execMap.Store(pid, entry)
+	execMap.Store(handle, entry)
 
-	payload := p.scriptBuf
 	client := p.client
 	agentID := p.agentID
 	timeoutSec := p.timeoutSeconds
@@ -169,7 +168,7 @@ func (p *Provider) ExecScript(_ context.Context) (int64, error) {
 		}
 	}()
 
-	return pid, nil
+	return handle, nil
 }
 
 // GetExecStatus checks whether the background ApplyConfig call has completed.

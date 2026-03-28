@@ -17,11 +17,9 @@ limitations under the License.
 package controller
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"strings"
-	"text/template"
 	"time"
 
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -55,39 +53,6 @@ type VRouterConfigReconciler struct {
 // +kubebuilder:rbac:groups="",resources=pods/exec,verbs=create
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
 // +kubebuilder:rbac:groups=kubevirt.io,resources=virtualmachines;virtualmachineinstances,verbs=get;list;watch
-
-var applyScriptTmpl = template.Must(template.New("apply").Parse(`#!/bin/vbash
-if [ "$(id -g -n)" != 'vyattacfg' ] ; then
-    exec sg vyattacfg -c "/bin/vbash $(readlink -f $0) $@"
-fi
-source /opt/vyatta/etc/functions/script-template
-configure
-
-# --- config section ---
-{{- if .Config }}
-load /dev/stdin <<'VYOS_CONFIG_EOF'
-{{ .Config }}
-VYOS_CONFIG_EOF
-{{- else }}
-load /opt/vyatta/etc/config.boot.default
-{{- end }}
-
-# --- commands section (optional) ---
-{{- if .Commands }}
-{{ .Commands }}
-{{- end }}
-
-commit
-{{- if .Save }}
-save
-{{- end }}
-`))
-
-type scriptData struct {
-	Config   string
-	Commands string
-	Save     bool
-}
 
 const requeueAfter = 3 * time.Second
 
@@ -228,24 +193,11 @@ func (r *VRouterConfigReconciler) pollExecStatus(ctx context.Context, cfg *vrout
 	return ctrl.Result{}, r.Status().Patch(ctx, cfg, patch)
 }
 
-// applyConfig renders the script and dispatches execution.
+// applyConfig dispatches config execution to the provider.
 func (r *VRouterConfigReconciler) applyConfig(ctx context.Context, cfg *vrouterv1.VRouterConfig, prov provider.Provider) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
-	var buf bytes.Buffer
-	if err := applyScriptTmpl.Execute(&buf, scriptData{
-		Config:   cfg.Spec.Config,
-		Commands: cfg.Spec.Commands,
-		Save:     cfg.Spec.Save,
-	}); err != nil {
-		return ctrl.Result{}, fmt.Errorf("render script: %w", err)
-	}
-
-	if err := prov.WriteFile(ctx, buf.Bytes()); err != nil {
-		return ctrl.Result{}, fmt.Errorf("write script: %w", err)
-	}
-
-	pid, err := prov.ExecScript(ctx)
+	pid, err := prov.ExecScript(ctx, cfg.Spec.Config, cfg.Spec.Commands, cfg.Spec.Save)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("exec script: %w", err)
 	}
