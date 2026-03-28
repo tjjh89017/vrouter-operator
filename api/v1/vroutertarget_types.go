@@ -41,11 +41,16 @@ type VRouterTargetStatus struct {
 	// The VRouterConfig controller uses this to force re-apply after a reboot.
 	// +optional
 	LastRebootTime *metav1.Time `json:"lastRebootTime,omitempty"`
+	// VMRunning reflects whether the target VM was observed as running during
+	// the most recent poll by the VRouterTarget controller.
+	// +optional
+	VMRunning bool `json:"vmRunning,omitempty"`
 }
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:shortName={vrt,vroutertarget}
+// +kubebuilder:printcolumn:name="VM Running",type=boolean,JSONPath=`.status.vmRunning`
 
 // VRouterTarget is the Schema for the vroutertargets API.
 type VRouterTarget struct {

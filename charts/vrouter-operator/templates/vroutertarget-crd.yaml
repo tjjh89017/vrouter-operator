@@ -18,7 +18,11 @@ spec:
     singular: vroutertarget
   scope: Namespaced
   versions:
-  - name: v1
+  - additionalPrinterColumns:
+    - jsonPath: .status.vmRunning
+      name: VM Running
+      type: boolean
+    name: v1
     schema:
       openAPIV3Schema:
         description: VRouterTarget is the Schema for the vroutertargets API.
@@ -153,6 +157,11 @@ spec:
                   ProxmoxNode is the Proxmox cluster node currently hosting the VM.
                   Populated and kept up-to-date by the ProxmoxCluster controller.
                 type: string
+              vmRunning:
+                description: |-
+                  VMRunning reflects whether the target VM was observed as running during
+                  the most recent poll by the VRouterTarget controller.
+                type: boolean
             type: object
         type: object
     served: true

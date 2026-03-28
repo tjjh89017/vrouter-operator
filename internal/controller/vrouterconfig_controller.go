@@ -20,7 +20,6 @@ import (
 	"context"
 	"fmt"
 	"strings"
-	"sync"
 	"time"
 
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -57,39 +56,6 @@ type VRouterConfigReconciler struct {
 
 const requeueAfter = 3 * time.Second
 
-// stoppedBackoff tracks per-object requeue intervals when VM is stopped.
-// Sawtooth pattern: min → ... → max → min → ...
-// State is in-memory only; resets to min on operator restart.
-const (
-	stoppedBackoffMin = 30 * time.Second
-	stoppedBackoffMax = 10 * time.Minute
-)
-
-var stoppedBackoffMu sync.Map // map[k8stypes.NamespacedName]time.Duration
-
-// nextStoppedBackoff returns the current requeue duration for key and advances
-// the stored value: doubles each call until max, then wraps back to min.
-func nextStoppedBackoff(key k8stypes.NamespacedName) time.Duration {
-	v, _ := stoppedBackoffMu.LoadOrStore(key, stoppedBackoffMin)
-	cur := v.(time.Duration)
-	var next time.Duration
-	if cur >= stoppedBackoffMax {
-		next = stoppedBackoffMin
-	} else {
-		next = cur * 2
-		if next > stoppedBackoffMax {
-			next = stoppedBackoffMax
-		}
-	}
-	stoppedBackoffMu.Store(key, next)
-	return cur
-}
-
-// resetStoppedBackoff removes the backoff entry for key (called when VM is running).
-func resetStoppedBackoff(key k8stypes.NamespacedName) {
-	stoppedBackoffMu.Delete(key)
-}
-
 func (r *VRouterConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	var cfg vrouterv1.VRouterConfig
 	if err := r.Get(ctx, req.NamespacedName, &cfg); err != nil {
@@ -125,18 +91,18 @@ func (r *VRouterConfigReconciler) onChange(ctx context.Context, _ ctrl.Request, 
 		return ctrl.Result{}, fmt.Errorf("build provider: %w", err)
 	}
 
-	// Check whether the VM is running; if stopped, retry with sawtooth backoff.
+	// Check whether the VM is running; if stopped, return without requeue.
+	// The VRouterTarget controller polls IsVMRunning every 60 s and patches
+	// Status.VMRunning; that status change triggers a configsForTarget watch
+	// event which will re-enqueue this VRouterConfig when the VM comes back.
 	running, err := prov.IsVMRunning(ctx)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("check VM running: %w", err)
 	}
-	objKey := k8stypes.NamespacedName{Namespace: cfg.Namespace, Name: cfg.Name}
 	if !running {
-		delay := nextStoppedBackoff(objKey)
-		log.Info("VM is stopped, will retry", "requeueAfter", delay.String())
-		return ctrl.Result{RequeueAfter: delay}, nil
+		log.Info("VM is stopped, skipping reconcile")
+		return ctrl.Result{}, nil
 	}
-	resetStoppedBackoff(objKey)
 
 	// Step 1: pre-check — QGA ping + vyos-router.service is-active.
 	if err := prov.CheckReady(ctx); err != nil {

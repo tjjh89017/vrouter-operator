@@ -214,8 +214,9 @@ func main() {
 		os.Exit(1)
 	}
 	if err := (&controller.VRouterTargetReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:     mgr.GetClient(),
+		Scheme:     mgr.GetScheme(),
+		RestConfig: mgr.GetConfig(),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "VRouterTarget")
 		os.Exit(1)
