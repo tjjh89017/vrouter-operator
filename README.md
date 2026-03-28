@@ -1,6 +1,6 @@
 # vRouter-Operator
 
-A Kubernetes Operator that manages VyOS virtual router configuration running on KubeVirt or Proxmox VE. Configuration is delivered via QEMU Guest Agent (QGA) over a virtio channel — no network reachability or sidecar injection required.
+A Kubernetes Operator that manages VyOS virtual router configuration running on KubeVirt, Proxmox VE, or bare-metal via the vrouter-daemon gRPC agent. Configuration is delivered via QEMU Guest Agent (QGA) over a virtio channel or gRPC — no network reachability or sidecar injection required.
 
 ## Demo
 
@@ -17,17 +17,21 @@ ProxmoxCluster ──clusterRef──→ VRouterTarget ←──── VRouterBi
 (endpoints +                   (provider +          (bind template       (config/commands
  credentials)                   params)              to targets)          template text)
       │                              │
-ProxmoxCluster                BindingController
-Controller                    → merge params (binding → target)
-(polls node,                  → render template
- reboot detect)               → create VRouterConfig per target (targetRef → VRouterTarget)
-      │                              │
-      └─ status.proxmoxNode   VRouterController
-         status.lastRebootTime → resolve VRouterTarget (provider info)
-                              → wait for VM running
+ProxmoxCluster                VRouterTarget
+Controller                    Controller
+(polls node,                  (polls IsVMRunning every 60s,
+ reboot detect,                updates status.vmRunning,
+ unreachable →                 VMI watch for KubeVirt instant detect)
+ vmRunning=false)                    │
+      │                        status.vmRunning change
+      └─ status.proxmoxNode    → triggers VRouterConfig reconcile
+         status.lastRebootTime
+                                     │
+                              VRouterConfig Controller
+                              → resolve VRouterTarget (provider info)
+                              → check VM running (skip if stopped)
                               → wait for vyos-router.service active
-                              → write rendered script via QGA
-                              → execute script via QGA
+                              → deliver config via QGA or gRPC
                               → update status (phase, conditions)
 ```
 
@@ -48,6 +52,7 @@ Controller                    → merge params (binding → target)
 - Kubernetes cluster
   - KubeVirt installed for the `kubevirt` provider (tested on Harvester)
   - Proxmox VE cluster accessible for the `proxmox` provider
+  - [vrouter-daemon](https://github.com/tjjh89017/vrouter-daemon) deployed for the `vrouter-daemon` provider
 - cert-manager (for webhook TLS)
 - VyOS VM image with `qemu-guest-agent` installed (no `cloud-init` needed)
 
@@ -187,6 +192,24 @@ spec:
     hostname: "my-vyos-router"
 ```
 
+**vrouter-daemon** (bare metal or any VM with daemon installed):
+
+```yaml
+apiVersion: vrouter.kojuro.date/v1
+kind: VRouterTarget
+metadata:
+  name: vyos-daemon
+  namespace: default
+spec:
+  provider:
+    type: vrouter-daemon
+    daemon:
+      address: "vrouter-daemon.vrouter-system.svc:50052"
+      agentID: "7dea4734a47e49b0952457b684587e7c"
+  params:
+    hostname: "my-vyos-router"
+```
+
 ### 4. Create a VRouterBinding
 
 Bind one or more templates to one or more targets:
@@ -203,14 +226,17 @@ spec:
   save: true          # persist config after commit (default: true)
   targetRefs:
     - name: vyos-kubevirt
+    - name: vyos-proxmox
+    - name: vyos-daemon
 ```
 
-The operator will automatically create a `VRouterConfig` for each target and apply it to the VM via QGA.
+The operator will automatically create a `VRouterConfig` for each target and apply it to the VM via QGA or gRPC.
 
 ### 5. Check status
 
 ```bash
 kubectl get vrc                  # or: kubectl get vrouterconfig
+kubectl get vrt                  # check vmRunning column
 kubectl get vrb                  # or: kubectl get vrouterbinding
 kubectl wait vrc/hostname-binding.vyos-kubevirt --for=condition=Applied
 ```
@@ -226,6 +252,8 @@ The Proxmox provider uses the Proxmox REST API to communicate with VMs via QEMU 
 `ProxmoxCluster` centralises endpoint and credential configuration for a Proxmox VE cluster. All `VRouterTarget` resources on the same cluster share one `ProxmoxCluster` instead of repeating credentials per target.
 
 The controller polls `/cluster/resources` on `syncInterval` and writes the resolved node name into `VRouterTarget.status.proxmoxNode`, eliminating per-operation node-lookup API calls.
+
+If the Proxmox API is unreachable (e.g. network issue), the controller treats all associated VMs as stopped (`status.vmRunning=false`) and retries after `syncInterval`.
 
 ```yaml
 apiVersion: vrouter.kojuro.date/v1
@@ -268,6 +296,49 @@ When a reboot is detected, `VRouterTarget.status.lastRebootTime` is updated and 
 ```bash
 kubectl wait --for=condition=Synced proxmoxcluster/pve-cluster --timeout=120s
 kubectl get vrt vyos-proxmox -o jsonpath='{.status.proxmoxNode}'
+```
+
+---
+
+## vrouter-daemon Provider
+
+The `vrouter-daemon` provider connects to the [vrouter-daemon](https://github.com/tjjh89017/vrouter-daemon) gRPC ControlService. The daemon runs as a standalone process (inside or alongside the router VM) and bridges gRPC calls to local VyOS configuration.
+
+Each router registers itself with the daemon using a unique `agentID`. The operator sends raw config and commands to the daemon, which renders and executes the vbash script internally.
+
+### VRouterTarget
+
+```yaml
+spec:
+  provider:
+    type: vrouter-daemon
+    daemon:
+      address: "vrouter-daemon.vrouter-system.svc:50052"  # gRPC endpoint
+      agentID: "7dea4734a47e49b0952457b684587e7c"         # unique agent identifier
+      timeoutSeconds: 60                                   # optional, default 60
+```
+
+### VM running detection
+
+`IsVMRunning` calls `ControlService.IsConnected` — if the agent is not connected to the daemon, the VM is treated as stopped and config apply is skipped until the agent reconnects.
+
+---
+
+## VRouterTarget Status
+
+The `VRouterTarget` controller polls `IsVMRunning` every 60 seconds and updates `status.vmRunning`. For KubeVirt, VMI watch events trigger an immediate check without waiting for the next poll.
+
+| Field | Description |
+|-------|-------------|
+| `status.vmRunning` | Whether the VM was observed as running in the last poll |
+| `status.proxmoxNode` | Proxmox node hosting the VM (Proxmox provider only) |
+| `status.lastRebootTime` | Timestamp of last detected reboot (Proxmox provider only) |
+
+When `vmRunning` changes from `false` to `true`, all referencing `VRouterConfig` resources are automatically re-enqueued for reconcile.
+
+```bash
+kubectl get vrt                  # shows VM Running column
+kubectl get vrt vyos-kubevirt -o jsonpath='{.status.vmRunning}'
 ```
 
 ---
@@ -325,7 +396,7 @@ kubectl wait vrc/<name> --for=condition=Applied --timeout=120s
 |----------|--------|-------|
 | KubeVirt | ✅ Supported | Same-cluster KubeVirt; SPDY exec into virt-launcher pod |
 | Proxmox VE | ✅ Supported | REST API + QGA; credentials via ProxmoxCluster |
-| gRPC Agent (bare metal) | 📋 Planned | See [gRPC proposal](docs/proposals/grpc-agent-architecture.md) |
+| vrouter-daemon (gRPC) | ✅ Supported | Standalone daemon; bare metal or any VM |
 
 ---
 
