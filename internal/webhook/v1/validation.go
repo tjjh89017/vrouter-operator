@@ -37,6 +37,16 @@ func validateProviderConfig(provider vrouterv1.ProviderConfig) error {
 		if provider.Proxmox.ClusterRef.Name == "" {
 			return fmt.Errorf("provider.proxmox.clusterRef.name must be set")
 		}
+	case vrouterv1.ProviderVRouterDaemon:
+		if provider.Daemon == nil {
+			return fmt.Errorf("provider.daemon must be set when type is vrouter-daemon")
+		}
+		if provider.Daemon.Address == "" {
+			return fmt.Errorf("provider.daemon.address must be set")
+		}
+		if provider.Daemon.AgentID == "" {
+			return fmt.Errorf("provider.daemon.agentID must be set")
+		}
 	default:
 		return fmt.Errorf("unknown provider type: %s", provider.Type)
 	}

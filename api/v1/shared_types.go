@@ -25,7 +25,7 @@ type NameRef struct {
 }
 
 // ProviderType specifies the virtualization backend.
-// +kubebuilder:validation:Enum=kubevirt;proxmox
+// +kubebuilder:validation:Enum=kubevirt;proxmox;vrouter-daemon
 type ProviderType string
 
 // ProviderConfig defines which virtualization backend to use and the target router.
@@ -37,6 +37,8 @@ type ProviderConfig struct {
 	KubeVirt *KubeVirtConfig `json:"kubevirt,omitempty"`
 	// +optional
 	Proxmox *ProxmoxConfig `json:"proxmox,omitempty"`
+	// +optional
+	Daemon *DaemonConfig `json:"daemon,omitempty"`
 }
 
 // SecretKeyRef references a specific key in a Secret.

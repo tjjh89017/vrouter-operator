@@ -48,6 +48,29 @@ spec:
                 description: ProviderConfig defines which virtualization backend to
                   use and the target router.
                 properties:
+                  daemon:
+                    description: DaemonConfig holds vrouter-daemon ControlService
+                      connection parameters.
+                    properties:
+                      address:
+                        description: |-
+                          Address is the gRPC endpoint of the vrouter-daemon ControlService
+                          (e.g., "vrouter-server.default.svc:9090").
+                        type: string
+                      agentID:
+                        description: AgentID is the identifier of the target router
+                          agent.
+                        type: string
+                      timeoutSeconds:
+                        default: 60
+                        description: TimeoutSeconds is the maximum time to wait for
+                          a config apply to complete.
+                        format: int32
+                        type: integer
+                    required:
+                    - address
+                    - agentID
+                    type: object
                   kubevirt:
                     description: KubeVirtConfig holds KubeVirt provider configuration
                       and router identification.
@@ -108,6 +131,7 @@ spec:
                     enum:
                     - kubevirt
                     - proxmox
+                    - vrouter-daemon
                     type: string
                 type: object
             required:
