@@ -11,9 +11,8 @@ controllerManager:
         drop:
         - ALL
     image:
-      repository: ghcr.io/tjjh89017/vrouter-operator
+      repository: tjjh89017/vrouter-operator
       tag: latest
-      pullPolicy: Always
     resources:
       limits:
         cpu: 500m
