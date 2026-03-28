@@ -302,25 +302,113 @@ kubectl get vrt vyos-proxmox -o jsonpath='{.status.proxmoxNode}'
 
 ## vrouter-daemon Provider
 
-The `vrouter-daemon` provider connects to the [vrouter-daemon](https://github.com/tjjh89017/vrouter-daemon) gRPC ControlService. The daemon runs as a standalone process (inside or alongside the router VM) and bridges gRPC calls to local VyOS configuration.
+The `vrouter-daemon` provider enables managing VyOS routers on **bare metal or any VM** without KubeVirt or Proxmox VE. It uses the [vrouter-daemon](https://github.com/tjjh89017/vrouter-daemon) gRPC agent, which runs on the VyOS host and connects back to a server deployed in Kubernetes.
 
-Each router registers itself with the daemon using a unique `agentID`. The operator sends raw config and commands to the daemon, which renders and executes the vbash script internally.
+### Architecture
 
-### VRouterTarget
+```
+vrouter-operator               vrouter-server (k8s)
+┌──────────────┐               ┌──────────────────────────────┐
+│  Controller  │   gRPC        │  ControlService (port 50052) │
+│       │      │──────────────→│         │                    │
+│  gRPC Client │               │    Redis (broker + registry) │
+└──────────────┘               │         │                    │
+                               │  AgentService (port 50051)   │
+                               └─────────┬────────────────────┘
+                                         │ gRPC bidir stream
+                                   ┌─────┴──────┐
+                                   │ VyOS agents │  (bare metal)
+                                   └────────────┘
+```
+
+- **vrouter-server** — runs in Kubernetes; two services:
+  - `ControlService` (ClusterIP `:50052`) — operator-facing: `IsConnected`, `ApplyConfig`
+  - `AgentService` (NodePort `30051`) — agent-facing bidirectional stream
+- **vrouter-agent** — runs on VyOS host; connects to `AgentService` and executes config pushes locally
+- **Redis** (HA via Sentinel) — brokers config payloads between server replicas and agents
+
+### Deploy vrouter-server
+
+```bash
+kubectl apply -f deploy/kubernetes/namespace.yaml
+kubectl apply -f deploy/kubernetes/redis-ha.yaml
+kubectl apply -f deploy/kubernetes/vrouter-daemon.yaml
+```
+
+Creates in `vrouter-system` namespace: Redis HA (3+3 Sentinel), vrouter-daemon deployment (2 replicas), ClusterIP service for the operator, NodePort service for agents.
+
+### Install vrouter-agent on VyOS
+
+Download the `.deb` from the [latest release](https://github.com/tjjh89017/vrouter-daemon/releases/latest):
+
+```bash
+dpkg -i vrouter-agent_<version>_amd64.deb
+```
+
+Edit `/etc/default/vrouter-agent`:
+
+```bash
+AGENT_ARGS="--server 172.30.0.40:30051"   # NodePort address
+VRF_NAME=mgmt                              # optional: run inside a VRF
+```
+
+```bash
+systemctl start vrouter-agent
+systemctl status vrouter-agent
+```
+
+### Getting the agentID
+
+By default `vrouter-agent` uses `/etc/machine-id` as its agent ID:
+
+```bash
+cat /etc/machine-id
+# e.g. 7dea4734a47e49b0952457b684587e7c
+```
+
+You can override it with `--agent-id` or the `AGENT_ID` environment variable in `/etc/default/vrouter-agent`.
+
+### VRouterTarget configuration
 
 ```yaml
+apiVersion: vrouter.kojuro.date/v1
+kind: VRouterTarget
+metadata:
+  name: vyos-daemon
+  namespace: default
 spec:
   provider:
     type: vrouter-daemon
     daemon:
-      address: "vrouter-daemon.vrouter-system.svc:50052"  # gRPC endpoint
-      agentID: "7dea4734a47e49b0952457b684587e7c"         # unique agent identifier
+      address: "vrouter-daemon.vrouter-system.svc:50052"  # ClusterIP service
+      agentID: "7dea4734a47e49b0952457b684587e7c"         # /etc/machine-id on VyOS host
       timeoutSeconds: 60                                   # optional, default 60
+  params:
+    hostname: "my-vyos-router"
 ```
 
 ### VM running detection
 
-`IsVMRunning` calls `ControlService.IsConnected` — if the agent is not connected to the daemon, the VM is treated as stopped and config apply is skipped until the agent reconnects.
+`IsVMRunning` calls `ControlService.IsConnected`. If the agent is not connected to the daemon (VM stopped, agent not running, or network issue), the VM is treated as stopped and config apply is skipped until the agent reconnects.
+
+### Disconnect policy
+
+The agent supports a `--disconnect-policy` flag that controls behavior when the server is unreachable:
+
+| Policy | Behavior |
+|--------|----------|
+| `keep` (default) | Maintain current config |
+| `rollback` | Re-apply init config after repeated failures |
+
+### Comparison with other providers
+
+| | KubeVirt | Proxmox VE | vrouter-daemon |
+|---|---|---|---|
+| Config delivery | QGA via SPDY exec | QGA via REST API | gRPC (daemon) |
+| Script rendering | Operator-side | Operator-side | Daemon-side |
+| VM running detect | VMI object + watch | Proxmox API | `IsConnected` RPC |
+| Bare metal support | No | No | Yes |
+| Extra infra needed | KubeVirt | Proxmox VE | vrouter-daemon + Redis |
 
 ---
 
