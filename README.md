@@ -2,6 +2,8 @@
 
 A Kubernetes Operator that manages VyOS virtual router configuration running on KubeVirt, Proxmox VE, or bare-metal via the vrouter-daemon gRPC agent. Configuration is delivered via QEMU Guest Agent (QGA) over a virtio channel or gRPC — no network reachability or sidecar injection required.
 
+vRouter-Operator is a community project for managing VyOS-based virtual routers on Kubernetes/KubeVirt. It is not an official VyOS product and does not imply official support from VyOS Networks. For VyOS-specific product support, users should contact VyOS Networks directly.
+
 ## Demo
 
 YouTube: [https://www.youtube.com/watch?v=RsieH9gFU4I](https://www.youtube.com/watch?v=RsieH9gFU4I)
