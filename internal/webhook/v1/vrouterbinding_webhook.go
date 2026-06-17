@@ -100,6 +100,13 @@ func (v *VRouterBindingCustomValidator) ValidateUpdate(ctx context.Context, oldO
 	}
 	vrouterbindinglog.Info("Validation for VRouterBinding upon update", "name", vrouterbinding.GetName())
 	warnings := deprecationWarnings(vrouterbinding)
+
+	// Skip ref existence validation while the object is being deleted. Referenced
+	// targets/templates may already be gone, and rejecting updates (e.g. finalizer
+	// removal) here would deadlock deletion of the binding.
+	if !vrouterbinding.GetDeletionTimestamp().IsZero() {
+		return warnings, nil
+	}
 	return warnings, validateBinding(ctx, v.Client, vrouterbinding)
 }
 

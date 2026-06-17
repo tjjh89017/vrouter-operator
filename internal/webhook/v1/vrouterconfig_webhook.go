@@ -104,6 +104,13 @@ func (v *VRouterConfigCustomValidator) ValidateUpdate(ctx context.Context, oldOb
 		return nil, fmt.Errorf("expected a VRouterConfig object for the newObj but got %T", newObj)
 	}
 	vrouterconfiglog.Info("Validation for VRouterConfig upon update", "name", vrouterconfig.GetName())
+
+	// Skip targetRef validation while the object is being deleted. The targetRef
+	// may already be gone, and rejecting updates (e.g. finalizer removal) here
+	// would deadlock deletion of the VRouterConfig and its owning binding.
+	if !vrouterconfig.GetDeletionTimestamp().IsZero() {
+		return nil, nil
+	}
 	return nil, validateVRouterConfig(ctx, v.Client, vrouterconfig)
 }
 
