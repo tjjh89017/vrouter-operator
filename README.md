@@ -12,6 +12,17 @@ YouTube: [https://www.youtube.com/watch?v=RsieH9gFU4I](https://www.youtube.com/w
 
 ---
 
+## Talks
+
+**DevConf.cz 2026** — *vRouter-Operator: Bringing GitOps and IaC to Virtual Network Functions in Kubernetes*
+
+- Recording: [https://www.youtube.com/watch?v=yQsc4NWkfoI](https://www.youtube.com/watch?v=yQsc4NWkfoI)
+- Slides: [https://speakerdeck.com/tjjh89017/devconf-dot-cz-2026-vrouter-operator-bringing-gitops-and-iac-to-virtual-network-functions-in-kubernetes](https://speakerdeck.com/tjjh89017/devconf-dot-cz-2026-vrouter-operator-bringing-gitops-and-iac-to-virtual-network-functions-in-kubernetes)
+
+[![DevConf.cz 2026 talk](http://img.youtube.com/vi/yQsc4NWkfoI/0.jpg)](https://www.youtube.com/watch?v=yQsc4NWkfoI "DevConf.cz 2026 — vRouter-Operator")
+
+---
+
 ## How It Works
 
 ```
