@@ -18,8 +18,21 @@ package qga
 
 import (
 	"bytes"
+	"crypto/rand"
+	"encoding/hex"
+	"fmt"
+	"strings"
 	"text/template"
 )
+
+// heredocDelimiterPrefix is the stable, human-readable prefix for the config
+// heredoc delimiter. A random suffix is appended per render so the delimiter
+// cannot be predicted and embedded in the config to break out of the heredoc.
+const heredocDelimiterPrefix = "VROUTER_CONFIG_EOF_"
+
+// heredocDelimiterAttempts bounds how many times we grow the random suffix
+// while trying to find a delimiter that does not collide with the config.
+const heredocDelimiterAttempts = 8
 
 var applyScriptTmpl = template.Must(template.New("apply").Parse(`#!/bin/vbash
 if [ "$(id -g -n)" != 'vyattacfg' ] ; then
@@ -30,9 +43,9 @@ configure
 
 # --- config section ---
 {{- if .Config }}
-load /dev/stdin <<'VYOS_CONFIG_EOF'
+load /dev/stdin <<'{{ .Delimiter }}'
 {{ .Config }}
-VYOS_CONFIG_EOF
+{{ .Delimiter }}
 {{- else }}
 load /opt/vyatta/etc/config.boot.default
 {{- end }}
@@ -49,18 +62,53 @@ save
 `))
 
 type scriptData struct {
-	Config   string
-	Commands string
-	Save     bool
+	Config    string
+	Commands  string
+	Save      bool
+	Delimiter string
+}
+
+// heredocDelimiter returns a random, unpredictable delimiter that is guaranteed
+// not to appear as a standalone line inside config. The config is untrusted
+// (rendered from lower-privileged user params), so a fixed delimiter would let a
+// crafted line close the heredoc early and run the remainder as root. We derive
+// the delimiter from crypto/rand and, on the astronomically unlikely chance it
+// still collides with a config line, grow the random suffix and retry.
+func heredocDelimiter(config string) (string, error) {
+	// Index the config lines once so each candidate is an O(1) lookup.
+	lines := make(map[string]struct{})
+	for _, line := range strings.Split(config, "\n") {
+		lines[line] = struct{}{}
+	}
+
+	size := 16
+	for attempt := 0; attempt < heredocDelimiterAttempts; attempt++ {
+		buf := make([]byte, size)
+		if _, err := rand.Read(buf); err != nil {
+			return "", fmt.Errorf("generating heredoc delimiter: %w", err)
+		}
+		candidate := heredocDelimiterPrefix + hex.EncodeToString(buf)
+		if _, collides := lines[candidate]; !collides {
+			return candidate, nil
+		}
+		size *= 2
+	}
+	return "", fmt.Errorf("unable to generate collision-free heredoc delimiter after %d attempts", heredocDelimiterAttempts)
 }
 
 // RenderScript renders a vbash apply script for the given VyOS config params.
 func RenderScript(config, commands string, save bool) ([]byte, error) {
+	delimiter, err := heredocDelimiter(config)
+	if err != nil {
+		return nil, err
+	}
+
 	var buf bytes.Buffer
 	if err := applyScriptTmpl.Execute(&buf, scriptData{
-		Config:   config,
-		Commands: commands,
-		Save:     save,
+		Config:    config,
+		Commands:  commands,
+		Save:      save,
+		Delimiter: delimiter,
 	}); err != nil {
 		return nil, err
 	}
