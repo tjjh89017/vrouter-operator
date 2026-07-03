@@ -18,11 +18,14 @@ package controller
 
 import (
 	"context"
+	"testing"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -201,6 +204,20 @@ var _ = Describe("VRouterBinding Controller", func() {
 			Expect(*cfg.Spec.Save).To(BeFalse())
 		})
 
+		// NOTE: this test creates the binding and generated VRouterConfig
+		// through the real envtest apiserver via generatedConfigFor, so the
+		// fetched cfg.Spec.Save has already been round-tripped through
+		// Create/Get. That round-trip means the apiserver's own
+		// +kubebuilder:default=true marker fills in Save on the wire whether
+		// or not the controller itself ever touched the field, so a
+		// controller regression that forced Save to &true instead of
+		// propagating binding.Spec.Save unchanged would be indistinguishable
+		// from correct behavior here. This test therefore only pins CRD-level
+		// defaulting (*cfg.Spec.Save == true when unset), not the binding
+		// controller's own nil-propagation code path (the plain assignment
+		// `Save: binding.Spec.Save` in vrouterbinding_controller.go). See
+		// TestOnChange_SaveUnset_PropagatesNilWithoutForcingDefault below for
+		// a fake-client (no apiserver defaulting) test of that code path.
 		It("should apply the CRD default (save:true) when the binding leaves save unset", func() {
 			binding := &vrouterv1.VRouterBinding{
 				ObjectMeta: metav1.ObjectMeta{
@@ -211,10 +228,6 @@ var _ = Describe("VRouterBinding Controller", func() {
 					TargetRefs: []vrouterv1.NameRef{{Name: target.Name}},
 				},
 			}
-			// Save is nil at this point: the binding controller must propagate
-			// nil (not force a value) so the generated VRouterConfig's own
-			// save,omitempty field is omitted from the request and the
-			// apiserver's +kubebuilder:default=true fills it in.
 			Expect(binding.Spec.Save).To(BeNil())
 			Expect(k8sClient.Create(ctx, binding)).To(Succeed())
 			defer func() { _ = k8sClient.Delete(ctx, binding) }()
@@ -225,3 +238,63 @@ var _ = Describe("VRouterBinding Controller", func() {
 		})
 	})
 })
+
+// TestOnChange_SaveUnset_PropagatesNilWithoutForcingDefault is the
+// unit-level counterpart to the "should apply the CRD default (save:true)"
+// envtest spec above. It uses a fake client instead of the real envtest
+// apiserver, so there is no CRD-level +kubebuilder:default=true defaulting
+// to fill in Save on the wire -- whatever onChange builds is exactly what
+// ends up on the fetched object. This isolates the binding controller's own
+// propagation code (`Save: binding.Spec.Save` in
+// vrouterbinding_controller.go) from apiserver defaulting: if that line were
+// ever changed to force a value (e.g. `Save: ptr.To(true)`) instead of
+// passing the binding's own *bool through unchanged, this test would still
+// see a non-nil Save and fail, whereas the envtest spec above could not
+// detect that regression.
+func TestOnChange_SaveUnset_PropagatesNilWithoutForcingDefault(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := vrouterv1.AddToScheme(scheme); err != nil {
+		t.Fatalf("failed to register scheme: %v", err)
+	}
+
+	target := &vrouterv1.VRouterTarget{
+		ObjectMeta: metav1.ObjectMeta{Name: "save-test-target", Namespace: "default"},
+		Spec: vrouterv1.VRouterTargetSpec{
+			Provider: vrouterv1.ProviderConfig{
+				Type:     vrouterv1.ProviderKubeVirt,
+				KubeVirt: &vrouterv1.KubeVirtConfig{Name: "save-test-vm"},
+			},
+		},
+	}
+	tmpl := &vrouterv1.VRouterTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "tmpl1", Namespace: "default"},
+	}
+	binding := &vrouterv1.VRouterBinding{
+		ObjectMeta: metav1.ObjectMeta{Name: "save-unset-binding", Namespace: "default"},
+		Spec: vrouterv1.VRouterBindingSpec{
+			TemplateRefs: []vrouterv1.NameRef{{Name: "tmpl1"}},
+			TargetRefs:   []vrouterv1.NameRef{{Name: target.Name}},
+			// Save intentionally left nil.
+		},
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(target, tmpl, binding).
+		WithStatusSubresource(&vrouterv1.VRouterBinding{}).
+		Build()
+	r := &VRouterBindingReconciler{Client: cl, Scheme: scheme}
+
+	if _, err := r.onChange(context.Background(), reconcile.Request{}, binding); err != nil {
+		t.Fatalf("onChange returned error: %v", err)
+	}
+
+	var cfg vrouterv1.VRouterConfig
+	cfgName := binding.Name + "." + target.Name
+	if err := cl.Get(context.Background(), types.NamespacedName{Name: cfgName, Namespace: "default"}, &cfg); err != nil {
+		t.Fatalf("get generated VRouterConfig: %v", err)
+	}
+	if cfg.Spec.Save != nil {
+		t.Errorf("cfg.Spec.Save = %v, want nil (the controller must propagate binding.Spec.Save unchanged, not force a default)", *cfg.Spec.Save)
+	}
+}

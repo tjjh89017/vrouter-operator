@@ -155,6 +155,104 @@ func TestVRouterBindingValidateUpdate_DeletionInProgress_SkipsRefValidation(t *t
 	}
 }
 
+// TestDeprecationWarnings_TemplateRefSet_ReturnsWarning verifies that using
+// the deprecated spec.templateRef field produces an admission warning naming
+// the field, so a cluster-admin sees the deprecation notice in kubectl
+// output. Before this test, deprecationWarnings had no direct coverage: only
+// its error-path *complement* (rejection reasons) was exercised elsewhere.
+func TestDeprecationWarnings_TemplateRefSet_ReturnsWarning(t *testing.T) {
+	binding := &vrouterv1.VRouterBinding{
+		Spec: vrouterv1.VRouterBindingSpec{
+			TemplateRef: &vrouterv1.NameRef{Name: "tmpl1"}, //nolint:staticcheck // backward compat
+		},
+	}
+
+	warnings := deprecationWarnings(binding)
+	if len(warnings) != 1 {
+		t.Fatalf("warnings = %v, want exactly one warning", warnings)
+	}
+	if !strings.Contains(warnings[0], "spec.templateRef") {
+		t.Fatalf("warning = %q, want it to mention spec.templateRef", warnings[0])
+	}
+}
+
+// TestDeprecationWarnings_TemplateRefUnset_NoWarnings is the complementary
+// case: a binding using only the non-deprecated spec.templateRefs must not
+// produce any warnings.
+func TestDeprecationWarnings_TemplateRefUnset_NoWarnings(t *testing.T) {
+	binding := &vrouterv1.VRouterBinding{
+		Spec: vrouterv1.VRouterBindingSpec{
+			TemplateRefs: []vrouterv1.NameRef{{Name: "tmpl1"}},
+		},
+	}
+
+	if warnings := deprecationWarnings(binding); len(warnings) != 0 {
+		t.Fatalf("warnings = %v, want none", warnings)
+	}
+}
+
+// TestVRouterBindingValidateCreate_TemplateRefSet_ReturnsWarningAlongsideResult
+// exercises the warning through the actual webhook entrypoint (ValidateCreate),
+// confirming the warning survives being plumbed through alongside a
+// successful validation result, not just when returned directly from the
+// helper.
+func TestVRouterBindingValidateCreate_TemplateRefSet_ReturnsWarningAlongsideResult(t *testing.T) {
+	binding := &vrouterv1.VRouterBinding{
+		ObjectMeta: metaObj("b1"),
+		Spec: vrouterv1.VRouterBindingSpec{
+			TemplateRef: &vrouterv1.NameRef{Name: "tmpl1"}, //nolint:staticcheck // backward compat
+			TargetRefs:  []vrouterv1.NameRef{{Name: "r1"}},
+		},
+	}
+	tmpl := &vrouterv1.VRouterTemplate{ObjectMeta: metaObj("tmpl1")}
+	target := &vrouterv1.VRouterTarget{ObjectMeta: metaObj("r1")}
+	cl := newTestClient(t, tmpl, target)
+	validator := &VRouterBindingCustomValidator{Client: cl}
+
+	warnings, err := validator.ValidateCreate(context.Background(), binding)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if len(warnings) != 1 || !strings.Contains(warnings[0], "spec.templateRef") {
+		t.Fatalf("warnings = %v, want a single spec.templateRef deprecation warning", warnings)
+	}
+}
+
+// TestValidateBinding_TargetRefBeingDeleted_TreatedAsExisting documents the
+// current (undocumented-elsewhere) behavior when a targetRef points at an
+// object that still exists on the API server but has a non-zero
+// DeletionTimestamp (e.g. it is stuck on its own finalizer while being
+// deleted): validateBinding's plain Get-based existence check does not
+// distinguish "exists" from "exists and terminating", so such a reference is
+// currently accepted. This is a characterization test: it pins today's
+// behavior so a future change here (in either direction) is a deliberate,
+// visible diff rather than an accidental one.
+func TestValidateBinding_TargetRefBeingDeleted_TreatedAsExisting(t *testing.T) {
+	now := metav1.Now()
+	terminatingTarget := &vrouterv1.VRouterTarget{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace:         testNamespace,
+			Name:              "r1",
+			DeletionTimestamp: &now,
+			Finalizers:        []string{"vrouter.kojuro.date/finalizer"},
+		},
+	}
+	tmpl := &vrouterv1.VRouterTemplate{ObjectMeta: metaObj("tmpl1")}
+	cl := newTestClient(t, tmpl, terminatingTarget)
+
+	binding := &vrouterv1.VRouterBinding{
+		ObjectMeta: metaObj("b1"),
+		Spec: vrouterv1.VRouterBindingSpec{
+			TemplateRefs: []vrouterv1.NameRef{{Name: "tmpl1"}},
+			TargetRefs:   []vrouterv1.NameRef{{Name: "r1"}},
+		},
+	}
+
+	if err := validateBinding(context.Background(), cl, binding); err != nil {
+		t.Fatalf("expected a terminating-but-still-present target to be accepted (current behavior), got error: %v", err)
+	}
+}
+
 // TestVRouterBindingValidateUpdate_NotDeleting_StillValidatesRefs is the
 // complementary case: when the object is not being deleted, ValidateUpdate must
 // still reject missing refs (i.e. the skip is deletion-only, not blanket).
