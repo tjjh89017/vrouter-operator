@@ -171,8 +171,10 @@ func (r *ProxmoxClusterReconciler) onChange(ctx context.Context, _ ctrl.Request,
 		if found {
 			// Reboot detection via Proxmox-level uptime (detects hard restart only).
 			if info.uptime > 0 && info.uptime <= threshold {
-				t.Status.LastRebootTime = &now
-				changed = true
+				if rt := nextRebootTime(now.Time, secondsToDuration(info.uptime), t.Status.LastRebootTime); rt != nil {
+					t.Status.LastRebootTime = rt
+					changed = true
+				}
 			}
 			// Reboot detection via guest OS uptime through QGA (detects soft reboot too).
 			if vrouterv1.BoolValue(cluster.Spec.CheckGuestUptime, true) && info.node != "" {
@@ -180,8 +182,10 @@ func (r *ProxmoxClusterReconciler) onChange(ctx context.Context, _ ctrl.Request,
 				if err != nil {
 					log.Info("fetch guest uptime skipped", "target", t.Name, "reason", err.Error())
 				} else if guestUptime > 0 && guestUptime <= threshold {
-					t.Status.LastRebootTime = &now
-					changed = true
+					if rt := nextRebootTime(now.Time, secondsToDuration(guestUptime), t.Status.LastRebootTime); rt != nil {
+						t.Status.LastRebootTime = rt
+						changed = true
+					}
 				}
 			}
 		}
@@ -222,6 +226,44 @@ type vmInfo struct {
 // is cleared rather than left stale. See SPEC.md §7.3 step 4a.
 func desiredProxmoxNode(vmMap map[int]vmInfo, vmid int) string {
 	return vmMap[vmid].node
+}
+
+// rebootTimeTolerance absorbs uptime second-granularity jitter and small
+// clock/scheduling skew between syncs so that a later sync observed within
+// the SAME reboot's low-uptime window is not mistaken for a new reboot.
+const rebootTimeTolerance = 5 * time.Second
+
+// secondsToDuration converts a Proxmox/guest uptime value, reported in
+// fractional seconds, to a time.Duration.
+func secondsToDuration(seconds float64) time.Duration {
+	return time.Duration(seconds * float64(time.Second))
+}
+
+// nextRebootTime decides whether a freshly observed low uptime represents a
+// genuinely new reboot and, if so, what value status.LastRebootTime should
+// be updated to.
+//
+// now is the time the uptime was observed, uptime is the reported guest/
+// Proxmox uptime at that moment, and current is the target's currently
+// stored LastRebootTime (nil if never set). The reboot instant is derived as
+// bootTime = now - uptime rather than stamped as `now`, so repeated syncs
+// during the same reboot's low-uptime window derive (approximately) the same
+// bootTime instead of drifting forward on every sync.
+//
+// It returns nil ("no update needed") when current is already within
+// rebootTimeTolerance of the derived bootTime, i.e. this observation is
+// still part of the same reboot as the one already recorded. Otherwise it
+// returns a *metav1.Time set to the derived bootTime: either because no
+// reboot was recorded yet (current == nil), or because bootTime is more than
+// rebootTimeTolerance newer than current, indicating a genuinely new reboot
+// happened.
+func nextRebootTime(now time.Time, uptime time.Duration, current *metav1.Time) *metav1.Time {
+	bootTime := now.Add(-uptime)
+	if current != nil && bootTime.Sub(current.Time) <= rebootTimeTolerance {
+		return nil
+	}
+	t := metav1.NewTime(bootTime)
+	return &t
 }
 
 // fetchClusterResources calls /api2/json/cluster/resources?type=vm and returns a map of VMID → vmInfo.
