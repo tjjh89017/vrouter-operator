@@ -504,13 +504,22 @@ onChange():
   2. IsVMRunning()
      → false → skip (VM stopped, no action)
   3. CheckReady()
-     → fail → if phase was Applied: reset phase=Pending and set condition
-       Applied=False (reason=RouterNotReady, message includes the CheckReady
-       error) in the same status patch, since a previously-Applied result can
-       no longer be trusted once the router stops answering ready checks
-       (commonly a mid-reboot window). If phase was not Applied, status is
-       left untouched (nothing to invalidate). Either way, requeue(10s); this
-       is not treated as a reconcile error.
+     → fail → if an exec is in flight (execPID > 0) and it has been running
+       longer than the apply timeout (measured from execStartedTime, backfilled
+       to "now" on first observation if a config left mid-apply by an older
+       controller version has execPID > 0 but no recorded execStartedTime),
+       the router being unreachable does not excuse the apply from its
+       timeout: clear execPID, set phase=Failed, condition Applied=False
+       (reason=ApplyTimeout), return nil (no retry) — the same outcome as
+       step 4's own apply-timeout handling below, so a persistently failing
+       CheckReady cannot keep the config in Applying forever just because
+       step 4 is never reached. Otherwise: if phase was Applied, reset
+       phase=Pending and set condition Applied=False (reason=RouterNotReady,
+       message includes the CheckReady error) in the same status patch, since
+       a previously-Applied result can no longer be trusted once the router
+       stops answering ready checks (commonly a mid-reboot window). If phase
+       was not Applied, status is left untouched (nothing to invalidate).
+       Either way, requeue(10s); this is not treated as a reconcile error.
 
   4. if execPID > 0:
        GetExecStatus(execPID)
@@ -570,7 +579,7 @@ onDelete():
 - `generation > observedGeneration` → new spec available, dispatch exec
 - A target reboot newer than the last reboot this config has already attempted forces exactly one re-apply for the current generation, regardless of `observedGeneration`
 - Failed phase has no auto-retry; the config only re-dispatches when the user updates spec (new generation) or the target reboots again. A reboot-forced apply that fails does **not** get re-dispatched again for the same reboot — this closes the hot-loop that a permanently-failing render (e.g. a bad `set` command) combined with a stale reboot timestamp used to cause.
-- A dispatched apply that never exits is bounded by a fixed apply timeout; once exceeded, the config is marked Failed instead of being polled forever. There is currently no CRD field to tune this timeout per config. The timeout bounds both "GetExecStatus keeps succeeding but reports still running" and "GetExecStatus keeps failing with a non-lost error" — a provider that cannot reliably tell a stale/unknown-pid error apart from a transient one (see KubeVirt/Proxmox GetExecStatus doc comments) would otherwise retry the error indefinitely without ever reaching Applied, Failed, or a fresh dispatch.
+- A dispatched apply that never exits is bounded by a fixed apply timeout; once exceeded, the config is marked Failed instead of being polled forever. There is currently no CRD field to tune this timeout per config. The timeout bounds "GetExecStatus keeps succeeding but reports still running", "GetExecStatus keeps failing with a non-lost error" (a provider that cannot reliably tell a stale/unknown-pid error apart from a transient one, see KubeVirt/Proxmox GetExecStatus doc comments, would otherwise retry the error indefinitely without ever reaching Applied, Failed, or a fresh dispatch), and — as of the CheckReady-failure fix above — "CheckReady itself keeps failing", so a router that goes unreachable while an exec is in flight cannot pin the config in Applying forever just because step 4 (which normally evaluates this timeout) is never reached.
 - If the previously dispatched exec's result can no longer be retrieved, the controller does not treat this as a normal error to retry indefinitely — it clears the exec handle and re-dispatches a fresh `ExecScript` call, since retrying the same (now-meaningless) handle can never succeed.
 - `Applied` is set to `False` the moment a new generation (or a reboot-forced re-apply) is dispatched — not only on failure — so `kubectl wait --for=condition=Applied` cannot return early against a stale `True` left over from a previous generation while a new apply is in flight. The condition's `observedGeneration` reflects the generation the exec was actually dispatched for, not necessarily the object's current `.metadata.generation` (which may have moved on while the script was still running).
 - `Applied` is also flipped to `False` (reason=`RouterNotReady`) the moment step 3's `CheckReady` fails on a config that was previously `Applied` — otherwise a stale `True` would let `kubectl wait --for=condition=Applied` report success for the entire window the router is unreachable, even though the controller no longer trusts that result. If the config was not previously `Applied` (already `Pending`/`Applying`/`Failed`), a `CheckReady` failure leaves status untouched — there is no stale `True` to clear.
