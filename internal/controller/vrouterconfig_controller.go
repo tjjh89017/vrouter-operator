@@ -120,18 +120,31 @@ func (r *VRouterConfigReconciler) onChange(ctx context.Context, _ ctrl.Request, 
 		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 	}
 
+	// Steps 2-3: poll a running script, or decide whether to (re-)dispatch.
+	return r.dispatchOrPoll(ctx, cfg, prov, &target)
+}
+
+// dispatchOrPoll implements steps 2-3 of onChange: if a script is already
+// running, poll it; otherwise decide whether the current generation (or a
+// target reboot) requires a fresh apply dispatch. It is factored out of
+// onChange so it can be exercised directly in tests with a fake Provider,
+// without needing a real provider.New target (which performs live network
+// calls in CheckReady/IsVMRunning).
+func (r *VRouterConfigReconciler) dispatchOrPoll(ctx context.Context, cfg *vrouterv1.VRouterConfig, prov provider.Provider, target *vrouterv1.VRouterTarget) (ctrl.Result, error) {
 	// Step 2: check for a running script first.
 	if cfg.Status.ExecPID > 0 {
 		return r.pollExecStatus(ctx, cfg, prov)
 	}
 
-	// If the VM was rebooted after the last apply, force re-apply by resetting
-	// observedGeneration so the generation check below triggers the apply path.
+	// If the VM was rebooted more recently than the last reboot-forced apply
+	// we dispatched, force re-apply by resetting observedGeneration so the
+	// generation check below triggers the apply path. shouldForceReapplyForReboot
+	// only fires for a reboot we have not yet dispatched an attempt for, so a
+	// single reboot forces at most one re-apply — even if that apply fails —
+	// instead of hot-looping (see SPEC §7.2: Failed has no auto-retry).
 	effectiveObservedGen := cfg.Status.ObservedGeneration
-	if target.Status.LastRebootTime != nil {
-		if cfg.Status.LastAppliedTime == nil || cfg.Status.LastAppliedTime.Before(target.Status.LastRebootTime) {
-			effectiveObservedGen = 0
-		}
+	if shouldForceReapplyForReboot(cfg.Status.LastRebootHandledTime, target.Status.LastRebootTime) {
+		effectiveObservedGen = 0
 	}
 
 	// Skip only when this generation is conclusively done (Applied or Failed).
@@ -141,7 +154,25 @@ func (r *VRouterConfigReconciler) onChange(ctx context.Context, _ ctrl.Request, 
 	}
 
 	// Step 3: phase is Pending or spec changed — render and apply.
-	return r.applyConfig(ctx, cfg, prov)
+	return r.applyConfig(ctx, cfg, prov, target.Status.LastRebootTime)
+}
+
+// shouldForceReapplyForReboot decides whether a target reboot should force a
+// fresh apply attempt for this generation. It returns true only when the
+// target has rebooted more recently than the last reboot-forced dispatch
+// recorded in lastRebootHandledTime, so a given reboot forces at most one
+// re-apply attempt — regardless of whether that attempt later succeeds or
+// fails. Callers must stamp lastRebootHandledTime at dispatch time (not only
+// on success) so a failing apply does not get re-dispatched on every
+// reconcile.
+func shouldForceReapplyForReboot(lastRebootHandledTime, targetLastRebootTime *metav1.Time) bool {
+	if targetLastRebootTime == nil {
+		return false
+	}
+	if lastRebootHandledTime == nil {
+		return true
+	}
+	return lastRebootHandledTime.Before(targetLastRebootTime)
 }
 
 func (r *VRouterConfigReconciler) onDelete(ctx context.Context, _ ctrl.Request, cfg *vrouterv1.VRouterConfig) (ctrl.Result, error) {
@@ -215,8 +246,12 @@ func (r *VRouterConfigReconciler) pollExecStatus(ctx context.Context, cfg *vrout
 	return ctrl.Result{}, r.Status().Patch(ctx, cfg, patch)
 }
 
-// applyConfig dispatches config execution to the provider.
-func (r *VRouterConfigReconciler) applyConfig(ctx context.Context, cfg *vrouterv1.VRouterConfig, prov provider.Provider) (ctrl.Result, error) {
+// applyConfig dispatches config execution to the provider. targetRebootTime
+// is the current VRouterTarget.Status.LastRebootTime (may be nil); it is
+// stamped into cfg.Status.LastRebootHandledTime at dispatch time — whether
+// the apply later succeeds or fails — so a reboot forces at most one
+// re-apply attempt instead of re-dispatching on every reconcile.
+func (r *VRouterConfigReconciler) applyConfig(ctx context.Context, cfg *vrouterv1.VRouterConfig, prov provider.Provider, targetRebootTime *metav1.Time) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
 	pid, err := prov.ExecScript(ctx, cfg.Spec.Config, cfg.Spec.Commands, vrouterv1.BoolValue(cfg.Spec.Save, true))
@@ -230,6 +265,7 @@ func (r *VRouterConfigReconciler) applyConfig(ctx context.Context, cfg *vrouterv
 	cfg.Status.ObservedGeneration = cfg.Generation
 	cfg.Status.Phase = vrouterv1.PhaseApplying
 	cfg.Status.Message = ""
+	cfg.Status.LastRebootHandledTime = targetRebootTime
 	if err := r.Status().Patch(ctx, cfg, patch); err != nil {
 		return ctrl.Result{}, err
 	}

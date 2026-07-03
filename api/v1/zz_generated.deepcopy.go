@@ -483,6 +483,10 @@ func (in *VRouterConfigStatus) DeepCopyInto(out *VRouterConfigStatus) {
 		in, out := &in.LastAppliedTime, &out.LastAppliedTime
 		*out = (*in).DeepCopy()
 	}
+	if in.LastRebootHandledTime != nil {
+		in, out := &in.LastRebootHandledTime, &out.LastRebootHandledTime
+		*out = (*in).DeepCopy()
+	}
 	if in.Conditions != nil {
 		in, out := &in.Conditions, &out.Conditions
 		*out = make([]metav1.Condition, len(*in))
