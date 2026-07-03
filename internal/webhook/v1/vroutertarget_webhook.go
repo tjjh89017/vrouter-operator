@@ -22,6 +22,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
@@ -36,7 +37,7 @@ var vroutertargetlog = logf.Log.WithName("vroutertarget-resource")
 // SetupVRouterTargetWebhookWithManager registers the webhook for VRouterTarget in the manager.
 func SetupVRouterTargetWebhookWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewWebhookManagedBy(mgr).For(&vrouterv1.VRouterTarget{}).
-		WithValidator(&VRouterTargetCustomValidator{}).
+		WithValidator(&VRouterTargetCustomValidator{Client: mgr.GetClient()}).
 		WithDefaulter(&VRouterTargetCustomDefaulter{}).
 		Complete()
 }
@@ -68,10 +69,9 @@ func (d *VRouterTargetCustomDefaulter) Default(_ context.Context, obj runtime.Ob
 	return nil
 }
 
-// TODO(user): change verbs to "verbs=create;update;delete" if you want to enable deletion validation.
 // NOTE: The 'path' attribute must follow a specific pattern and should not be modified directly here.
 // Modifying the path for an invalid path can cause API server errors; failing to locate the webhook.
-// +kubebuilder:webhook:path=/validate-vrouter-kojuro-date-v1-vroutertarget,mutating=false,failurePolicy=fail,sideEffects=None,groups=vrouter.kojuro.date,resources=vroutertargets,verbs=create;update,versions=v1,name=vvroutertarget-v1.kb.io,admissionReviewVersions=v1
+// +kubebuilder:webhook:path=/validate-vrouter-kojuro-date-v1-vroutertarget,mutating=false,failurePolicy=fail,sideEffects=None,groups=vrouter.kojuro.date,resources=vroutertargets,verbs=create;update;delete,versions=v1,name=vvroutertarget-v1.kb.io,admissionReviewVersions=v1
 
 // VRouterTargetCustomValidator struct is responsible for validating the VRouterTarget resource
 // when it is created, updated, or deleted.
@@ -79,7 +79,7 @@ func (d *VRouterTargetCustomDefaulter) Default(_ context.Context, obj runtime.Ob
 // NOTE: The +kubebuilder:object:generate=false marker prevents controller-gen from generating DeepCopy methods,
 // as this struct is used only for temporary operations and does not need to be deeply copied.
 type VRouterTargetCustomValidator struct {
-	// TODO(user): Add more fields as needed for validation
+	client.Client
 }
 
 var _ webhook.CustomValidator = &VRouterTargetCustomValidator{}
@@ -114,12 +114,69 @@ func (v *VRouterTargetCustomValidator) ValidateUpdate(_ context.Context, oldObj,
 }
 
 // ValidateDelete implements webhook.CustomValidator so a webhook will be registered for the type VRouterTarget.
-func (v *VRouterTargetCustomValidator) ValidateDelete(_ context.Context, obj runtime.Object) (admission.Warnings, error) {
+func (v *VRouterTargetCustomValidator) ValidateDelete(ctx context.Context, obj runtime.Object) (admission.Warnings, error) {
 	vroutertarget, ok := obj.(*vrouterv1.VRouterTarget)
 	if !ok {
 		return nil, fmt.Errorf("expected a VRouterTarget object but got %T", obj)
 	}
 	vroutertargetlog.Info("Validation for VRouterTarget upon deletion", "name", vroutertarget.GetName())
 
-	return nil, nil
+	return nil, checkTargetNotReferenced(ctx, v.Client, vroutertarget)
+}
+
+// checkTargetNotReferenced rejects deletion of a VRouterTarget that is still
+// referenced by a VRouterBinding (spec.targetRefs) or a VRouterConfig
+// (spec.targetRef). References are resolved with the same-namespace-only
+// policy enforced elsewhere in this package, so only objects in the target's
+// own namespace can reference it; it is enough to list within that namespace.
+func checkTargetNotReferenced(ctx context.Context, cl client.Client, target *vrouterv1.VRouterTarget) error {
+	var bindingList vrouterv1.VRouterBindingList
+	if err := cl.List(ctx, &bindingList, client.InNamespace(target.Namespace)); err != nil {
+		return fmt.Errorf("list VRouterBindings: %w", err)
+	}
+
+	var referencingBindings []string
+	for _, binding := range bindingList.Items {
+		for _, ref := range binding.Spec.TargetRefs {
+			if ref.Name == target.Name && vrouterv1.ResolveNamespace(ref, binding.Namespace) == target.Namespace {
+				referencingBindings = append(referencingBindings, binding.Name)
+				break
+			}
+		}
+	}
+
+	var configList vrouterv1.VRouterConfigList
+	if err := cl.List(ctx, &configList, client.InNamespace(target.Namespace)); err != nil {
+		return fmt.Errorf("list VRouterConfigs: %w", err)
+	}
+
+	var referencingConfigs []string
+	for _, cfg := range configList.Items {
+		ref := cfg.Spec.TargetRef
+		if ref.Name == target.Name && vrouterv1.ResolveNamespace(ref, cfg.Namespace) == target.Namespace {
+			referencingConfigs = append(referencingConfigs, cfg.Name)
+		}
+	}
+
+	total := len(referencingBindings) + len(referencingConfigs)
+	if total == 0 {
+		return nil
+	}
+
+	// Name at least one referencing object of each kind found, and note how many more exist.
+	var first string
+	var kind string
+	switch {
+	case len(referencingBindings) > 0:
+		first = referencingBindings[0]
+		kind = "VRouterBinding"
+	default:
+		first = referencingConfigs[0]
+		kind = "VRouterConfig"
+	}
+
+	if total == 1 {
+		return fmt.Errorf("cannot delete VRouterTarget %q: still referenced by %s %q", target.Name, kind, first)
+	}
+	return fmt.Errorf("cannot delete VRouterTarget %q: still referenced by %s %q (and %d others)", target.Name, kind, first, total-1)
 }

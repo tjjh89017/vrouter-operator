@@ -84,6 +84,7 @@ webhooks:
     operations:
     - CREATE
     - UPDATE
+    - DELETE
     resources:
     - vroutertargets
   sideEffects: None
