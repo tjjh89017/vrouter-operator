@@ -147,6 +147,29 @@ func TestVRouterTemplateValidateCreate_DeniedFunc_Rejected(t *testing.T) {
 	}
 }
 
+// TestVRouterTemplateValidateCreate_AllowedSprigFunc_Accepted pins the
+// positive counterpart to TestVRouterTemplateValidateCreate_DeniedFunc_Rejected:
+// a template using a permitted sprig helper (default, one of the functions
+// SPEC §5.2 explicitly calls out as intended to work) must still parse
+// successfully at admission. Without this, a regression that replaced
+// vrotemplate.Funcs() with an empty/stub FuncMap here (re-diverging
+// validate-time from render-time, the exact bug fixed by commit 9792bc3)
+// would not be caught: every existing "valid syntax" case in this file uses
+// only bare field access/if/range, which parses fine even against an empty
+// FuncMap.
+func TestVRouterTemplateValidateCreate_AllowedSprigFunc_Accepted(t *testing.T) {
+	tmpl := &vrouterv1.VRouterTemplate{
+		ObjectMeta: metaObj("tmpl-allowed-func"),
+		Spec: vrouterv1.VRouterTemplateSpec{
+			Config: `mtu {{ .MTU | default "1500" }};`,
+		},
+	}
+	v := &VRouterTemplateCustomValidator{}
+	if _, err := v.ValidateCreate(context.Background(), tmpl); err != nil {
+		t.Fatalf("expected the permitted sprig \"default\" function to be accepted, got error: %v", err)
+	}
+}
+
 func TestVRouterTemplateDefault_NoopDoesNotMutateOrError(t *testing.T) {
 	tmpl := &vrouterv1.VRouterTemplate{
 		ObjectMeta: metaObj("tmpl1"),

@@ -140,6 +140,93 @@ func TestPollExecStatus_StuckExec_WithinTimeout_StillPolls(t *testing.T) {
 	}
 }
 
+// timeoutBoundaryMargin is the slack used by the "just under"/"just over"
+// timeout boundary tests below so a slow test runner cannot flip the
+// timeout comparison's outcome: it must be comfortably larger than the time
+// it takes this test to execute (microseconds) but much smaller than
+// execApplyTimeout itself, so the test still exercises the real `>`
+// boundary in pollExecStatus rather than the "way over/under" cases already
+// covered elsewhere in this file.
+const timeoutBoundaryMargin = 3 * time.Second
+
+// TestPollExecStatus_StuckExec_JustUnderTimeout_StillPolls exercises the
+// actual `time.Since(execStarted.Time) > execApplyTimeout` boundary from
+// the "not yet timed out" side: an exec started timeoutBoundaryMargin
+// *before* the timeout deadline must still be polled, not failed.
+func TestPollExecStatus_StuckExec_JustUnderTimeout_StillPolls(t *testing.T) {
+	startedJustUnder := metav1.NewTime(time.Now().Add(-execApplyTimeout + timeoutBoundaryMargin))
+	cfg := &vrouterv1.VRouterConfig{
+		ObjectMeta: metav1.ObjectMeta{Name: "c5", Namespace: "default", Generation: 1},
+		Spec: vrouterv1.VRouterConfigSpec{
+			TargetRef: vrouterv1.NameRef{Name: "r1"},
+			Config:    "set system host-name test",
+		},
+		Status: vrouterv1.VRouterConfigStatus{
+			Phase:              vrouterv1.PhaseApplying,
+			ExecPID:            42,
+			ExecStartedTime:    &startedJustUnder,
+			ObservedGeneration: 1,
+		},
+	}
+
+	r, cl := newFakeReconciler(t, cfg)
+
+	result, err := r.pollExecStatus(context.Background(), cfg, fakeNeverExitingProvider{})
+	if err != nil {
+		t.Fatalf("pollExecStatus returned error, want nil: %v", err)
+	}
+	if result.RequeueAfter == 0 {
+		t.Errorf("result = %+v, want RequeueAfter > 0 (must not time out just under the boundary)", result)
+	}
+
+	var got vrouterv1.VRouterConfig
+	if err := cl.Get(context.Background(), k8stypes.NamespacedName{Name: "c5", Namespace: "default"}, &got); err != nil {
+		t.Fatalf("get updated config: %v", err)
+	}
+	if got.Status.Phase != vrouterv1.PhaseApplying {
+		t.Errorf("status.phase = %q, want unchanged %q (must not time out just under the boundary)", got.Status.Phase, vrouterv1.PhaseApplying)
+	}
+}
+
+// TestPollExecStatus_StuckExec_JustOverTimeout_TimesOutToFailed is the
+// complementary boundary case: an exec started timeoutBoundaryMargin
+// *past* the timeout deadline must be failed, exercising the same `>`
+// comparison from the "already timed out" side.
+func TestPollExecStatus_StuckExec_JustOverTimeout_TimesOutToFailed(t *testing.T) {
+	startedJustOver := metav1.NewTime(time.Now().Add(-execApplyTimeout - timeoutBoundaryMargin))
+	cfg := &vrouterv1.VRouterConfig{
+		ObjectMeta: metav1.ObjectMeta{Name: "c6", Namespace: "default", Generation: 1},
+		Spec: vrouterv1.VRouterConfigSpec{
+			TargetRef: vrouterv1.NameRef{Name: "r1"},
+			Config:    "set system host-name test",
+		},
+		Status: vrouterv1.VRouterConfigStatus{
+			Phase:              vrouterv1.PhaseApplying,
+			ExecPID:            42,
+			ExecStartedTime:    &startedJustOver,
+			ObservedGeneration: 1,
+		},
+	}
+
+	r, cl := newFakeReconciler(t, cfg)
+
+	result, err := r.pollExecStatus(context.Background(), cfg, fakeNeverExitingProvider{})
+	if err != nil {
+		t.Fatalf("pollExecStatus returned error, want nil: %v", err)
+	}
+	if result.RequeueAfter != 0 {
+		t.Errorf("result = %+v, want no requeue-for-retry once just past the boundary", result)
+	}
+
+	var got vrouterv1.VRouterConfig
+	if err := cl.Get(context.Background(), k8stypes.NamespacedName{Name: "c6", Namespace: "default"}, &got); err != nil {
+		t.Fatalf("get updated config: %v", err)
+	}
+	if got.Status.Phase != vrouterv1.PhaseFailed {
+		t.Errorf("status.phase = %q, want %q (must time out just past the boundary)", got.Status.Phase, vrouterv1.PhaseFailed)
+	}
+}
+
 // TestPollExecStatus_ExitedWithinWindow_SucceedsNormally verifies the
 // normal success path (exec exits with code 0 before the timeout) is
 // unchanged by the timeout logic.

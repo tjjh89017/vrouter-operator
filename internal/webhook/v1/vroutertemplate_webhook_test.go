@@ -20,8 +20,9 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
 	vrouterv1 "github.com/tjjh89017/vrouter-operator/api/v1"
-	// TODO (user): Add any additional imports if needed
 )
 
 var _ = Describe("VRouterTemplate Webhook", func() {
@@ -84,4 +85,32 @@ var _ = Describe("VRouterTemplate Webhook", func() {
 		// })
 	})
 
+	// This Context drives the real envtest apiserver (k8sClient.Create), not
+	// the validator's Go methods directly. It is the only place in this
+	// package that proves the VRouterTemplate validating webhook is actually
+	// registered and reachable end-to-end (TLS cert, webhook path, admission
+	// review round-trip) -- every other template test in this package
+	// (vroutertemplate_syntax_test.go) calls VRouterTemplateCustomValidator's
+	// methods in-process and would still pass even if the webhook were never
+	// wired into the manager at all.
+	Context("End-to-end admission via the real apiserver", func() {
+		It("rejects a template with invalid Go template syntax on create", func() {
+			bad := &vrouterv1.VRouterTemplate{
+				ObjectMeta: metav1.ObjectMeta{Name: "e2e-invalid-template", Namespace: "default"},
+				Spec:       vrouterv1.VRouterTemplateSpec{Config: "interface {{ .IfaceName"},
+			}
+			err := k8sClient.Create(ctx, bad)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("spec.config: invalid template syntax"))
+		})
+
+		It("admits a template with valid Go template syntax on create", func() {
+			good := &vrouterv1.VRouterTemplate{
+				ObjectMeta: metav1.ObjectMeta{Name: "e2e-valid-template", Namespace: "default"},
+				Spec:       vrouterv1.VRouterTemplateSpec{Config: "interface {{ .IfaceName }} { }"},
+			}
+			Expect(k8sClient.Create(ctx, good)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, good)).To(Succeed())
+		})
+	})
 })

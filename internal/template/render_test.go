@@ -64,6 +64,41 @@ func TestRender_DeniesGetHostByNameFunc(t *testing.T) {
 	}
 }
 
+// TestRender_InvalidSyntax_ReturnsParseError verifies that a template with a
+// Go template syntax error (as opposed to a denied-function error) is
+// rejected with a distinct, identifiable error, and never silently produces
+// partial/garbled output.
+func TestRender_InvalidSyntax_ReturnsParseError(t *testing.T) {
+	out, err := Render(`interface {{ .IfaceName`, map[string]any{})
+	if err == nil {
+		t.Fatalf("expected a parse error for unclosed template syntax, got output %q", out)
+	}
+	if !strings.Contains(err.Error(), "parse template") {
+		t.Fatalf("error = %q, want it to be wrapped as a parse error", err.Error())
+	}
+}
+
+// TestRender_UndefinedMapKey_RendersNoValueLiteral is a characterization
+// test documenting Go's text/template default behavior for a key absent
+// from the data map: it renders the literal string "<no value>" rather than
+// failing the render. This matters operationally because a typo'd param
+// name in a VRouterTemplate would silently inject "<no value>" into a
+// rendered VyOS config/heredoc instead of failing fast at reconcile time.
+// This test exists so a future change here (e.g. adding
+// template.Option("missingkey=error") to fail fast instead) is a
+// deliberate, visible diff rather than an accidental behavior change either
+// way.
+func TestRender_UndefinedMapKey_RendersNoValueLiteral(t *testing.T) {
+	out, err := Render(`mtu {{ .DoesNotExist }};`, map[string]any{"Other": "value"})
+	if err != nil {
+		t.Fatalf("unexpected error rendering a template with an undefined map key: %v", err)
+	}
+	want := `mtu <no value>;`
+	if out != want {
+		t.Fatalf("unexpected render output: got %q, want %q", out, want)
+	}
+}
+
 // TestRender_BenignTemplateStillWorks proves that removing the dangerous
 // functions does not break normal template usage: field interpolation and
 // the sprig "default" helper (used by SPEC §5.2) both still work.

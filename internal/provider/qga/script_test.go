@@ -17,6 +17,7 @@ limitations under the License.
 package qga
 
 import (
+	"os/exec"
 	"regexp"
 	"strings"
 	"testing"
@@ -121,6 +122,141 @@ func TestRenderScript_BenignConfigIntact(t *testing.T) {
 		if !strings.Contains(script, want) {
 			t.Fatalf("expected rendered script to contain %q, script:\n%s", want, script)
 		}
+	}
+}
+
+// TestRenderScript_EmptyConfig_LoadsDefaultBoot verifies that an empty
+// config skips the heredoc entirely and falls back to loading the default
+// boot config, exercising the template's {{ else }} branch (untested
+// before: every other test in this file passes a non-empty config).
+func TestRenderScript_EmptyConfig_LoadsDefaultBoot(t *testing.T) {
+	out, err := RenderScript("", "", true)
+	if err != nil {
+		t.Fatalf("RenderScript returned unexpected error: %v", err)
+	}
+	script := string(out)
+
+	if strings.Contains(script, "load /dev/stdin") {
+		t.Fatalf("expected no heredoc for an empty config, script:\n%s", script)
+	}
+	if !strings.Contains(script, "load /opt/vyatta/etc/config.boot.default") {
+		t.Fatalf("expected the default-boot-config fallback line, script:\n%s", script)
+	}
+}
+
+// TestRenderScript_SaveFalse_OmitsSaveLine is the negative counterpart to
+// TestRenderScript_BenignConfigIntact's save=true assertion: previously
+// nothing in this file asserted that save=false actually *omits* the
+// "save" line, only that save=true includes it.
+func TestRenderScript_SaveFalse_OmitsSaveLine(t *testing.T) {
+	out, err := RenderScript("system {\n    host-name router\n}", "", false)
+	if err != nil {
+		t.Fatalf("RenderScript returned unexpected error: %v", err)
+	}
+	script := string(out)
+
+	if !strings.Contains(script, "commit") {
+		t.Fatalf("expected the script to still contain commit, script:\n%s", script)
+	}
+	for _, line := range strings.Split(script, "\n") {
+		if strings.TrimSpace(line) == "save" {
+			t.Fatalf("save=false must omit the \"save\" line, script:\n%s", script)
+		}
+	}
+}
+
+// TestRenderScript_EmptyCommands_OmitsCommandsSection verifies that an empty
+// commands string produces a script with no content between the config
+// section and "commit" -- as opposed to an empty line or a stray marker.
+func TestRenderScript_EmptyCommands_OmitsCommandsSection(t *testing.T) {
+	out, err := RenderScript("system {\n    host-name router\n}", "", true)
+	if err != nil {
+		t.Fatalf("RenderScript returned unexpected error: %v", err)
+	}
+	script := string(out)
+
+	_, _, after := extractHeredocBody(t, script)
+	afterJoined := strings.Join(after, "\n")
+	if strings.Contains(afterJoined, "run ") {
+		t.Fatalf("expected no commands content for an empty Commands string, script:\n%s", script)
+	}
+}
+
+// TestRenderScript_MultiLineCommands_AllLinesPreserved verifies that a
+// multi-line Commands string is rendered verbatim (all lines present, in
+// order), not just a single command line as every other test in this file
+// uses.
+func TestRenderScript_MultiLineCommands_AllLinesPreserved(t *testing.T) {
+	commands := strings.Join([]string{
+		"set interfaces ethernet eth0 address 192.0.2.1/24",
+		"set protocols static route 0.0.0.0/0 next-hop 192.0.2.254",
+		"run show interfaces",
+	}, "\n")
+
+	out, err := RenderScript("system {\n    host-name router\n}", commands, true)
+	if err != nil {
+		t.Fatalf("RenderScript returned unexpected error: %v", err)
+	}
+	script := string(out)
+
+	for _, line := range strings.Split(commands, "\n") {
+		if !strings.Contains(script, line) {
+			t.Fatalf("expected script to contain command line %q, script:\n%s", line, script)
+		}
+	}
+}
+
+// TestRenderScript_HeredocQuotingPreventsRealShellExpansion is the one test
+// in this file that actually hands the rendered heredoc to a real bash
+// process, rather than only parsing it as a Go string. The other tests in
+// this file (extractHeredocBody-based) prove the delimiter cannot collide
+// with a config line, but that alone does not prove bash won't expand
+// shell metacharacters (command substitution, variable expansion) embedded
+// in the config -- that guarantee comes from the heredoc being quoted
+// (<<'DELIM'), a detail this test verifies against a real bash, not just a
+// regex match on the template output.
+func TestRenderScript_HeredocQuotingPreventsRealShellExpansion(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not available in test environment")
+	}
+
+	config := strings.Join([]string{
+		"before-marker",
+		"$(echo COMMAND_SUBSTITUTION_RAN)",
+		"`echo BACKTICK_SUBSTITUTION_RAN`",
+		"$HOME-should-stay-literal",
+		"after-marker",
+	}, "\n")
+
+	out, err := RenderScript(config, "", false)
+	if err != nil {
+		t.Fatalf("RenderScript returned unexpected error: %v", err)
+	}
+	script := string(out)
+
+	_, delimiter, _ := extractHeredocBody(t, script)
+
+	// Feed just the heredoc idiom (same quoted delimiter RenderScript chose)
+	// to a real bash and capture what "cat" actually receives -- proving the
+	// quoting bash applies, not a Go-side string comparison.
+	bashScript := "cat <<'" + delimiter + "'\n" + config + "\n" + delimiter + "\n"
+	cmd := exec.Command("bash", "-c", bashScript)
+	outBytes, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("running bash heredoc failed: %v, output:\n%s", err, outBytes)
+	}
+	got := string(outBytes)
+
+	// A byte-for-byte match against the original config is the real
+	// assertion: if bash had expanded $(...), `...`, or $HOME, got would
+	// contain the *expanded* command output instead of the literal source
+	// text, so it would no longer equal config verbatim. (Checking for the
+	// presence of e.g. "COMMAND_SUBSTITUTION_RAN" as a separate assertion
+	// would be wrong here -- that substring is part of the literal
+	// unexpanded command text itself, "$(echo COMMAND_SUBSTITUTION_RAN)",
+	// so it is present in `got` either way and proves nothing on its own.)
+	if got != config+"\n" {
+		t.Fatalf("bash did not pass the heredoc body through unmodified -- shell metacharacters were expanded.\nwant:\n%q\ngot:\n%q", config+"\n", got)
 	}
 }
 

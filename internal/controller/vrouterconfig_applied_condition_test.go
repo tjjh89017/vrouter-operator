@@ -199,6 +199,61 @@ func TestPollExecStatus_MidRunGenerationBump_DoesNotStampNeverAppliedGeneration(
 	}
 }
 
+// TestPollExecStatus_NonZeroExitCode_SetsAppliedFalseConfigFailed verifies
+// the plain apply-failure path: an exec that exits with a non-zero exit code
+// (as opposed to timing out, or the router going unready) must fail the
+// config with the Applied condition set to False/"ConfigFailed" and a
+// message carrying the exit code, distinct from the "ApplyTimeout" reason
+// used by the timeout path. Before this test, this exact branch (the `else`
+// in pollExecStatus's exit-code check) was only incidentally exercised by
+// the reboot re-apply-loop test, which never asserted on the condition.
+func TestPollExecStatus_NonZeroExitCode_SetsAppliedFalseConfigFailed(t *testing.T) {
+	cfg := &vrouterv1.VRouterConfig{
+		ObjectMeta: metav1.ObjectMeta{Name: "c1", Namespace: "default", Generation: 1},
+		Spec: vrouterv1.VRouterConfigSpec{
+			TargetRef: vrouterv1.NameRef{Name: "r1"},
+			Config:    "set system host-name test",
+		},
+		Status: vrouterv1.VRouterConfigStatus{
+			Phase:              vrouterv1.PhaseApplying,
+			ExecPID:            42,
+			ObservedGeneration: 1,
+		},
+	}
+
+	r, cl := newFakeReconciler(t, cfg)
+
+	if _, err := r.pollExecStatus(context.Background(), cfg, fakeExitedProvider{exitCode: 1}); err != nil {
+		t.Fatalf("pollExecStatus returned error: %v", err)
+	}
+
+	if cfg.Status.Phase != vrouterv1.PhaseFailed {
+		t.Errorf("status.phase = %q, want %q", cfg.Status.Phase, vrouterv1.PhaseFailed)
+	}
+
+	cond := findAppliedCondition(cfg.Status.Conditions)
+	if cond == nil {
+		t.Fatalf("expected an Applied condition to be set")
+	}
+	if cond.Status != metav1.ConditionFalse {
+		t.Errorf("Applied condition status = %q, want %q", cond.Status, metav1.ConditionFalse)
+	}
+	if cond.Reason != "ConfigFailed" {
+		t.Errorf("Applied condition reason = %q, want %q (distinct from the ApplyTimeout path)", cond.Reason, "ConfigFailed")
+	}
+
+	var got vrouterv1.VRouterConfig
+	if err := cl.Get(context.Background(), k8stypes.NamespacedName{Name: "c1", Namespace: "default"}, &got); err != nil {
+		t.Fatalf("get updated config: %v", err)
+	}
+	if persistedCond := findAppliedCondition(got.Status.Conditions); persistedCond == nil || persistedCond.Reason != "ConfigFailed" {
+		t.Errorf("persisted Applied condition = %+v, want reason ConfigFailed", persistedCond)
+	}
+	if got.Status.ExecPID != 0 {
+		t.Errorf("status.execPID = %d, want 0 (cleared on exit, success or failure)", got.Status.ExecPID)
+	}
+}
+
 // TestHandleRouterNotReady_PreviouslyApplied_ClearsStaleAppliedTrue is the
 // regression test for the CheckReady-failure gap: when the router stops
 // answering ready checks (e.g. it is mid-reboot), a config that was

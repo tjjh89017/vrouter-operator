@@ -20,8 +20,9 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
 	vrouterv1 "github.com/tjjh89017/vrouter-operator/api/v1"
-	// TODO (user): Add any additional imports if needed
 )
 
 var _ = Describe("VRouterTarget Webhook", func() {
@@ -84,4 +85,39 @@ var _ = Describe("VRouterTarget Webhook", func() {
 		// })
 	})
 
+	// This Context drives the real envtest apiserver (k8sClient.Create), not
+	// the validator's Go methods directly, proving the VRouterTarget
+	// validating webhook is actually registered and reachable end-to-end
+	// (TLS cert, webhook path, admission review round-trip) rather than only
+	// unit-tested against validateProviderConfig in isolation.
+	Context("End-to-end admission via the real apiserver", func() {
+		It("rejects an empty provider.kubevirt.name on create", func() {
+			bad := &vrouterv1.VRouterTarget{
+				ObjectMeta: metav1.ObjectMeta{Name: "e2e-invalid-target", Namespace: "default"},
+				Spec: vrouterv1.VRouterTargetSpec{
+					Provider: vrouterv1.ProviderConfig{
+						Type:     vrouterv1.ProviderKubeVirt,
+						KubeVirt: &vrouterv1.KubeVirtConfig{Name: ""},
+					},
+				},
+			}
+			err := k8sClient.Create(ctx, bad)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("provider.kubevirt.name"))
+		})
+
+		It("admits a valid provider config on create", func() {
+			good := &vrouterv1.VRouterTarget{
+				ObjectMeta: metav1.ObjectMeta{Name: "e2e-valid-target", Namespace: "default"},
+				Spec: vrouterv1.VRouterTargetSpec{
+					Provider: vrouterv1.ProviderConfig{
+						Type:     vrouterv1.ProviderKubeVirt,
+						KubeVirt: &vrouterv1.KubeVirtConfig{Name: "router-vm"},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, good)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, good)).To(Succeed())
+		})
+	})
 })

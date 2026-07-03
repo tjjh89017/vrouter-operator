@@ -20,8 +20,9 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
 	vrouterv1 "github.com/tjjh89017/vrouter-operator/api/v1"
-	// TODO (user): Add any additional imports if needed
 )
 
 var _ = Describe("VRouterBinding Webhook", func() {
@@ -84,4 +85,28 @@ var _ = Describe("VRouterBinding Webhook", func() {
 		// })
 	})
 
+	// This Context drives the real envtest apiserver (k8sClient.Create), not
+	// the validator's Go methods directly, proving the VRouterBinding
+	// validating webhook is actually registered and reachable end-to-end
+	// (TLS cert, webhook path, admission review round-trip) rather than only
+	// unit-tested against validateBinding in isolation (see
+	// vrouterbinding_refexist_test.go).
+	Context("End-to-end admission via the real apiserver", func() {
+		It("rejects an empty spec.targetRefs on create", func() {
+			bad := &vrouterv1.VRouterBinding{
+				ObjectMeta: metav1.ObjectMeta{Name: "e2e-invalid-binding", Namespace: "default"},
+				Spec: vrouterv1.VRouterBindingSpec{
+					TemplateRefs: []vrouterv1.NameRef{{Name: "does-not-matter"}},
+					// An empty (but present) slice satisfies the CRD schema's
+					// required-array constraint, so the request reaches the
+					// validating webhook, where validateBinding's own
+					// business-rule check rejects it.
+					TargetRefs: []vrouterv1.NameRef{},
+				},
+			}
+			err := k8sClient.Create(ctx, bad)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("spec.targetRefs must not be empty"))
+		})
+	})
 })
