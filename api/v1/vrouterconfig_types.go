@@ -42,6 +42,12 @@ type VRouterConfigStatus struct {
 	Phase string `json:"phase,omitempty"`
 	// +optional
 	ExecPID int64 `json:"execPID,omitempty"`
+	// ExecStartedTime records when the current execPID was dispatched. It
+	// bounds how long an in-flight apply may run: if the exec has not exited
+	// within the controller's apply timeout, the config is failed instead of
+	// being polled forever. It is cleared whenever execPID is cleared.
+	// +optional
+	ExecStartedTime *metav1.Time `json:"execStartedTime,omitempty"`
 	// +optional
 	LastAppliedTime *metav1.Time `json:"lastAppliedTime,omitempty"`
 	// LastRebootHandledTime records the VRouterTarget.Status.LastRebootTime

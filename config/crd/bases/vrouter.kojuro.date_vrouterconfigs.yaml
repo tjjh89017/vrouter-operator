@@ -141,6 +141,14 @@ spec:
               execPID:
                 format: int64
                 type: integer
+              execStartedTime:
+                description: |-
+                  ExecStartedTime records when the current execPID was dispatched. It
+                  bounds how long an in-flight apply may run: if the exec has not exited
+                  within the controller's apply timeout, the config is failed instead of
+                  being polled forever. It is cleared whenever execPID is cleared.
+                format: date-time
+                type: string
               lastAppliedTime:
                 format: date-time
                 type: string
