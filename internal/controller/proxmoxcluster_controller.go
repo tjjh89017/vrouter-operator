@@ -170,6 +170,13 @@ func (r *ProxmoxClusterReconciler) onChange(ctx context.Context, _ ctrl.Request,
 
 		if found {
 			// Reboot detection via Proxmox-level uptime (detects hard restart only).
+			// now (captured once above, outside this loop) is used as the
+			// observation timestamp for info.uptime: safe today because
+			// fetchClusterResources is a single fast REST call shared by every
+			// target in this loop, unlike the guest-uptime path below, which
+			// polls per-target for up to 10s and therefore takes its own fresh
+			// timestamp right after the measurement. If this fetch ever becomes
+			// slow, or per-target, capture a fresh timestamp here the same way.
 			if info.uptime > 0 && info.uptime <= threshold {
 				if rt := nextRebootTime(now.Time, secondsToDuration(info.uptime), t.Status.LastRebootTime); rt != nil {
 					t.Status.LastRebootTime = rt
