@@ -6,9 +6,9 @@ metadata:
   {{- include "vrouter-operator.labels" . | nindent 4 }}
 spec:
   dnsNames:
-  - '{{ include "vrouter-operator.fullname" . }}-webhook-service.{{ .Release.Namespace
+  - '{{ include "vrouter-operator.webhookServiceName" . }}.{{ .Release.Namespace
     }}.svc'
-  - '{{ include "vrouter-operator.fullname" . }}-webhook-service.{{ .Release.Namespace
+  - '{{ include "vrouter-operator.webhookServiceName" . }}.{{ .Release.Namespace
     }}.svc.{{ .Values.kubernetesClusterDomain }}'
   issuerRef:
     kind: Issuer
