@@ -104,6 +104,13 @@ spec:
                         description: Name of the VirtualMachine / VirtualMachineInstance.
                         type: string
                       namespace:
+                        description: |-
+                          Namespace the VirtualMachine / VirtualMachineInstance lives in. Defaults
+                          to the VRouterTarget's own namespace when omitted. Unlike Proxmox's
+                          ClusterRef, this is not a same-namespace-restricted reference to
+                          another CRD in this cluster — it names where the remote VMI itself
+                          lives (optionally in a different cluster via Kubeconfig), so an
+                          explicit cross-namespace value is allowed by design.
                         type: string
                     required:
                     - name

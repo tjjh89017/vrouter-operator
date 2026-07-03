@@ -47,6 +47,9 @@ spec:
                 x-kubernetes-preserve-unknown-fields: true
               save:
                 default: true
+                description: |-
+                  Save controls whether the applied configuration is persisted so it
+                  survives a reboot. Defaults to true when unset.
                 type: boolean
               targetRefs:
                 items:
