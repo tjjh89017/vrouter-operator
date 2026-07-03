@@ -78,6 +78,14 @@ func New(ctx context.Context, target *vrouterv1.VRouterTarget, cl client.Client,
 		if cfg.KubeVirt == nil {
 			return nil, fmt.Errorf("provider.kubevirt must be set when type is kubevirt")
 		}
-		return kubevirt.New(cl, restCfg, cfg.KubeVirt.Name, cfg.KubeVirt.Namespace)
+		// provider.kubevirt.namespace is optional and defaults to the
+		// VRouterTarget's own namespace (see docs/SPEC.md §3.2). Without this
+		// fallback the provider would look up the VMI in the empty
+		// namespace, get NotFound, and silently treat the VM as stopped.
+		ns := cfg.KubeVirt.Namespace
+		if ns == "" {
+			ns = target.Namespace
+		}
+		return kubevirt.New(cl, restCfg, cfg.KubeVirt.Name, ns)
 	}
 }
