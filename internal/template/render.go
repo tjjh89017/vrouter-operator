@@ -32,7 +32,7 @@ import (
 // process environment variables or performs network lookups could let a
 // VRouterTemplate author exfiltrate operator secrets (env, expandenv) or
 // trigger unwanted DNS lookups (getHostByName). SPEC §5.2 only intends safe,
-// pure helper functions (default, required, has, toYaml, range, etc.).
+// pure helper functions (default, has, range, etc.).
 var deniedFuncs = []string{"env", "expandenv", "getHostByName"}
 
 // Funcs returns the sprig function map with dangerous functions removed, so
@@ -81,8 +81,7 @@ func MergeParams(base, override apiextensionsv1.JSON) (map[string]any, error) {
 	// truthy base default (e.g. firewall.enabled: true) can be silently
 	// turned off by an override that merely mentions the key. See
 	// merge_params_test.go for characterization tests pinning this
-	// behavior and docs/SPEC.md §4.3, which is still pending a correction
-	// to match reality.
+	// behavior, and docs/SPEC.md §4.3, which documents it in detail.
 	if err := mergo.Merge(&baseMap, overMap,
 		mergo.WithOverride,
 		mergo.WithOverrideEmptySlice,
