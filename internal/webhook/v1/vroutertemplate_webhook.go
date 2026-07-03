@@ -21,7 +21,6 @@ import (
 	"fmt"
 	"text/template"
 
-	"github.com/Masterminds/sprig/v3"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -29,6 +28,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	vrouterv1 "github.com/tjjh89017/vrouter-operator/api/v1"
+	vrotemplate "github.com/tjjh89017/vrouter-operator/internal/template"
 )
 
 // nolint:unused
@@ -103,8 +103,13 @@ func (v *VRouterTemplateCustomValidator) ValidateDelete(_ context.Context, _ run
 }
 
 // validateTemplateSpec parses config and commands as Go templates to catch syntax errors early.
+//
+// It uses the same function map as render time (vrotemplate.Funcs, which
+// excludes env/expandenv/getHostByName) so a template calling a disallowed
+// function is rejected here at admission, rather than only surfacing as a
+// "function ... not defined" render failure during reconcile.
 func validateTemplateSpec(tmpl *vrouterv1.VRouterTemplate) error {
-	funcMap := sprig.TxtFuncMap()
+	funcMap := vrotemplate.Funcs()
 	if tmpl.Spec.Config != "" {
 		if _, err := template.New("config").Funcs(funcMap).Parse(tmpl.Spec.Config); err != nil {
 			return fmt.Errorf("spec.config: invalid template syntax: %w", err)

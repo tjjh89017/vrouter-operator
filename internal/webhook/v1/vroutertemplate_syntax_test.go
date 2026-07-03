@@ -111,6 +111,42 @@ func TestVRouterTemplateValidateUpdate_InvalidSyntax_Rejected(t *testing.T) {
 	}
 }
 
+// TestVRouterTemplateValidateCreate_DeniedFunc_Rejected asserts that a
+// template calling a sprig function removed from the render-time FuncMap
+// (env, expandenv, getHostByName — see internal/template.Funcs) is rejected
+// at admission. Before this test, the webhook parsed templates with the full,
+// unfiltered sprig.TxtFuncMap(), so such a template was accepted here and
+// only failed later at reconcile with a "function ... not defined" error,
+// contradicting SPEC §6.2 ("parsed with the same sprig FuncMap used at
+// render time").
+func TestVRouterTemplateValidateCreate_DeniedFunc_Rejected(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		config string
+	}{
+		{name: "env", config: `{{ env "HOME" }}`},
+		{name: "expandenv", config: `{{ expandenv "$HOME" }}`},
+		{name: "getHostByName", config: `{{ getHostByName "localhost" }}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tmpl := &vrouterv1.VRouterTemplate{
+				ObjectMeta: metaObj("tmpl-denied-" + tc.name),
+				Spec: vrouterv1.VRouterTemplateSpec{
+					Config: tc.config,
+				},
+			}
+			v := &VRouterTemplateCustomValidator{}
+			_, err := v.ValidateCreate(context.Background(), tmpl)
+			if err == nil {
+				t.Fatalf("expected error for denied function %q, got nil", tc.name)
+			}
+			if !strings.Contains(err.Error(), "spec.config: invalid template syntax") {
+				t.Fatalf("error = %q, want substring %q", err.Error(), "spec.config: invalid template syntax")
+			}
+		})
+	}
+}
+
 func TestVRouterTemplateDefault_NoopDoesNotMutateOrError(t *testing.T) {
 	tmpl := &vrouterv1.VRouterTemplate{
 		ObjectMeta: metaObj("tmpl1"),
