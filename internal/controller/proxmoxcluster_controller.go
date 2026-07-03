@@ -150,31 +150,39 @@ func (r *ProxmoxClusterReconciler) onChange(ctx context.Context, _ ctrl.Request,
 			continue
 		}
 
-		info, ok := vmMap[px.VMID]
-		if !ok {
-			continue
-		}
+		// info is the zero value (node == "") when the VMID is absent from
+		// the freshly fetched resource list, e.g. the VM was destroyed. found
+		// distinguishes that case from an actual match, since reboot
+		// detection below only makes sense for a VM that is currently listed.
+		info, found := vmMap[px.VMID]
 
 		patch := client.MergeFrom(t.DeepCopy())
 		changed := false
 
-		if t.Status.ProxmoxNode != info.node {
-			t.Status.ProxmoxNode = info.node
+		// SPEC §7.3 4a: clear a stale node instead of leaving it when the VM
+		// is no longer reported by /cluster/resources. A stale node can make
+		// the provider's cached-node fallback (resolveNode) target the wrong
+		// host if the VMID is later reused on a different node.
+		if desiredProxmoxNode(vmMap, px.VMID) != t.Status.ProxmoxNode {
+			t.Status.ProxmoxNode = desiredProxmoxNode(vmMap, px.VMID)
 			changed = true
 		}
-		// Reboot detection via Proxmox-level uptime (detects hard restart only).
-		if info.uptime > 0 && info.uptime <= threshold {
-			t.Status.LastRebootTime = &now
-			changed = true
-		}
-		// Reboot detection via guest OS uptime through QGA (detects soft reboot too).
-		if vrouterv1.BoolValue(cluster.Spec.CheckGuestUptime, true) && info.node != "" {
-			guestUptime, err := r.fetchGuestUptime(ctx, cluster, info.node, px.VMID, tokenID, tokenSecret)
-			if err != nil {
-				log.Info("fetch guest uptime skipped", "target", t.Name, "reason", err.Error())
-			} else if guestUptime > 0 && guestUptime <= threshold {
+
+		if found {
+			// Reboot detection via Proxmox-level uptime (detects hard restart only).
+			if info.uptime > 0 && info.uptime <= threshold {
 				t.Status.LastRebootTime = &now
 				changed = true
+			}
+			// Reboot detection via guest OS uptime through QGA (detects soft reboot too).
+			if vrouterv1.BoolValue(cluster.Spec.CheckGuestUptime, true) && info.node != "" {
+				guestUptime, err := r.fetchGuestUptime(ctx, cluster, info.node, px.VMID, tokenID, tokenSecret)
+				if err != nil {
+					log.Info("fetch guest uptime skipped", "target", t.Name, "reason", err.Error())
+				} else if guestUptime > 0 && guestUptime <= threshold {
+					t.Status.LastRebootTime = &now
+					changed = true
+				}
 			}
 		}
 
@@ -205,6 +213,15 @@ func (r *ProxmoxClusterReconciler) onChange(ctx context.Context, _ ctrl.Request,
 type vmInfo struct {
 	node   string
 	uptime float64
+}
+
+// desiredProxmoxNode returns the node a VRouterTarget's status.proxmoxNode
+// should be set to, given the cluster resources fetched in this sync and the
+// target's VMID. If vmid is not present in vmMap (the VM was destroyed, not
+// yet created, or moved away), it returns "" so any previously cached node
+// is cleared rather than left stale. See SPEC.md §7.3 step 4a.
+func desiredProxmoxNode(vmMap map[int]vmInfo, vmid int) string {
+	return vmMap[vmid].node
 }
 
 // fetchClusterResources calls /api2/json/cluster/resources?type=vm and returns a map of VMID → vmInfo.
