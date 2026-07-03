@@ -27,9 +27,27 @@ import (
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 )
 
+// deniedFuncs lists sprig helpers that must not be reachable from templates.
+// Templates render inside the operator process, so any function that reads
+// process environment variables or performs network lookups could let a
+// VRouterTemplate author exfiltrate operator secrets (env, expandenv) or
+// trigger unwanted DNS lookups (getHostByName). SPEC §5.2 only intends safe,
+// pure helper functions (default, required, has, toYaml, range, etc.).
+var deniedFuncs = []string{"env", "expandenv", "getHostByName"}
+
+// templateFuncs returns the sprig function map with dangerous functions
+// removed, so they are unavailable to templates ("function ... not defined").
+func templateFuncs() template.FuncMap {
+	funcs := sprig.TxtFuncMap()
+	for _, name := range deniedFuncs {
+		delete(funcs, name)
+	}
+	return funcs
+}
+
 // Render executes a Go text/template with sprig functions against the given data map.
 func Render(tmplStr string, data map[string]any) (string, error) {
-	tmpl, err := template.New("").Funcs(sprig.TxtFuncMap()).Parse(tmplStr)
+	tmpl, err := template.New("").Funcs(templateFuncs()).Parse(tmplStr)
 	if err != nil {
 		return "", fmt.Errorf("parse template: %w", err)
 	}
