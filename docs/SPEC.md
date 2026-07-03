@@ -115,7 +115,7 @@ spec:
 ```
 
 - `config` and `commands` can coexist; during apply, config is applied first, then commands
-- Template engine uses `text/template` + sprig, supporting `range`, `default`, `required`, etc.
+- Template engine uses `text/template` + sprig, supporting `range`, `default`, `has`, etc.
 
 ---
 
@@ -355,16 +355,16 @@ func renderTemplate(templateStr string, data map[string]interface{}) (string, er
 }
 ```
 
-**Function denylist**: templates render inside the operator process, so the full sprig function map is not exposed as-is. `env`, `expandenv`, and `getHostByName` are removed before parsing — an unrestricted template could otherwise read the operator pod's environment (potentially including injected secrets/tokens) via `{{ env "X" }}`/`{{ expandenv "$X" }}`, or trigger arbitrary DNS lookups via `getHostByName`. All other sprig helpers (`default`, `required`, `has`, `toYaml`, `range`, etc.) are unaffected. This filtered function map is the single source of truth for both controller-side rendering and the VRouterTemplate validating webhook's admission-time syntax check (§6.2), so a template calling a denied function is rejected at admission with "function ... not defined" instead of only failing later at reconcile.
+**Function denylist**: templates render inside the operator process, so the full sprig function map is not exposed as-is. `env`, `expandenv`, and `getHostByName` are removed before parsing — an unrestricted template could otherwise read the operator pod's environment (potentially including injected secrets/tokens) via `{{ env "X" }}`/`{{ expandenv "$X" }}`, or trigger arbitrary DNS lookups via `getHostByName`. All other sprig helpers (`default`, `has`, `range`, etc.) are unaffected. This filtered function map is the single source of truth for both controller-side rendering and the VRouterTemplate validating webhook's admission-time syntax check (§6.2), so a template calling a denied function is rejected at admission with "function ... not defined" instead of only failing later at reconcile.
 
 ### 5.2 Common sprig Functions
+
+The function set is sprig v3's `TxtFuncMap()` minus the denylist in §5.1 (`env`, `expandenv`, `getHostByName`). Note that `required` and `toYaml` are **not** available — those are Helm-specific additions, not sprig functions, and are not implemented by this operator.
 
 | Function | Purpose | Example |
 |----------|---------|---------|
 | `default` | Default value | `{{ default "8.8.8.8" .dnsServer }}` |
-| `required` | Required check, errors if missing | `{{ required "asn is required" .asn }}` |
 | `has` | Check if list contains a value | `{{ has "connected" .redistribute }}` |
-| `toYaml` | Convert nested struct to yaml | `{{ .config \| toYaml }}` |
 | `range` | Go template built-in | `{{ range .neighbors }}...{{ end }}` |
 
 ---
