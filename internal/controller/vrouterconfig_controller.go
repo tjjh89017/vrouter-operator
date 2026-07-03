@@ -115,16 +115,7 @@ func (r *VRouterConfigReconciler) onChange(ctx context.Context, _ ctrl.Request, 
 
 	// Step 1: pre-check — QGA ping + vyos-router.service is-active.
 	if err := prov.CheckReady(ctx); err != nil {
-		log.Info("router not ready, will retry", "reason", err.Error())
-		// VM may have rebooted; reset phase so we re-apply when it comes back.
-		if cfg.Status.Phase == vrouterv1.PhaseApplied {
-			patch := client.MergeFrom(cfg.DeepCopy())
-			cfg.Status.Phase = vrouterv1.PhasePending
-			if err := r.Status().Patch(ctx, cfg, patch); err != nil {
-				return ctrl.Result{}, err
-			}
-		}
-		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+		return r.handleRouterNotReady(ctx, cfg, err)
 	}
 
 	// Steps 2-3: poll a running script, or decide whether to (re-)dispatch.
@@ -180,6 +171,40 @@ func shouldForceReapplyForReboot(lastRebootHandledTime, targetLastRebootTime *me
 		return true
 	}
 	return lastRebootHandledTime.Before(targetLastRebootTime)
+}
+
+// handleRouterNotReady is step 1's failure path: the router did not pass
+// CheckReady (QGA unreachable, or vyos-router.service not yet up — commonly
+// because the VM is mid-reboot). It is factored out of onChange so it can be
+// exercised directly in tests without a real provider.
+//
+// If the config was previously Applied, that result can no longer be
+// trusted: phase resets to Pending so the generation check in dispatchOrPoll
+// re-applies once the router is ready again. The Applied condition must drop
+// to False in the same patch, not just once the re-apply is actually
+// dispatched — otherwise a stale True condition would let
+// `kubectl wait --for=condition=Applied` report success for the entire
+// (potentially long) window the router stays unreachable, the same
+// stale-condition problem the condition exists to avoid (see bc025da).
+func (r *VRouterConfigReconciler) handleRouterNotReady(ctx context.Context, cfg *vrouterv1.VRouterConfig, checkReadyErr error) (ctrl.Result, error) {
+	log := logf.FromContext(ctx)
+	log.Info("router not ready, will retry", "reason", checkReadyErr.Error())
+
+	if cfg.Status.Phase == vrouterv1.PhaseApplied {
+		patch := client.MergeFrom(cfg.DeepCopy())
+		cfg.Status.Phase = vrouterv1.PhasePending
+		meta.SetStatusCondition(&cfg.Status.Conditions, metav1.Condition{
+			Type:               vrouterv1.ConditionApplied,
+			Status:             metav1.ConditionFalse,
+			Reason:             "RouterNotReady",
+			Message:            fmt.Sprintf("router not ready, previous apply is no longer trusted: %s", checkReadyErr.Error()),
+			ObservedGeneration: cfg.Status.ObservedGeneration,
+		})
+		if err := r.Status().Patch(ctx, cfg, patch); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+	return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 }
 
 func (r *VRouterConfigReconciler) onDelete(ctx context.Context, _ ctrl.Request, cfg *vrouterv1.VRouterConfig) (ctrl.Result, error) {

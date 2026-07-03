@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -195,5 +196,104 @@ func TestPollExecStatus_MidRunGenerationBump_DoesNotStampNeverAppliedGeneration(
 	}
 	if cond.ObservedGeneration == cfg.Generation {
 		t.Errorf("Applied condition observedGeneration must not equal the never-applied cfg.Generation (%d)", cfg.Generation)
+	}
+}
+
+// TestHandleRouterNotReady_PreviouslyApplied_ClearsStaleAppliedTrue is the
+// regression test for the CheckReady-failure gap: when the router stops
+// answering ready checks (e.g. it is mid-reboot), a config that was
+// previously Applied resets phase to Pending because that result can no
+// longer be trusted -- but before this fix, the Applied condition was left
+// at its stale True value. That would let
+// `kubectl wait --for=condition=Applied` report success for the entire
+// window the router is unreachable, even though the controller itself no
+// longer trusts the previous apply (phase=Pending). The condition must flip
+// to False in the same patch that resets phase.
+func TestHandleRouterNotReady_PreviouslyApplied_ClearsStaleAppliedTrue(t *testing.T) {
+	cfg := &vrouterv1.VRouterConfig{
+		ObjectMeta: metav1.ObjectMeta{Name: "c1", Namespace: "default", Generation: 1},
+		Spec: vrouterv1.VRouterConfigSpec{
+			TargetRef: vrouterv1.NameRef{Name: "r1"},
+			Config:    "set system host-name test",
+		},
+		Status: vrouterv1.VRouterConfigStatus{
+			Phase:              vrouterv1.PhaseApplied,
+			ObservedGeneration: 1,
+			Conditions: []metav1.Condition{
+				{
+					Type:               vrouterv1.ConditionApplied,
+					Status:             metav1.ConditionTrue,
+					Reason:             "ConfigApplied",
+					Message:            "Configuration applied successfully.",
+					ObservedGeneration: 1,
+					LastTransitionTime: metav1.Now(),
+				},
+			},
+		},
+	}
+
+	r, cl := newFakeReconciler(t, cfg)
+
+	result, err := r.handleRouterNotReady(context.Background(), cfg, fmt.Errorf("QGA not responding"))
+	if err != nil {
+		t.Fatalf("handleRouterNotReady returned error: %v", err)
+	}
+	if result.RequeueAfter == 0 {
+		t.Fatalf("expected a non-zero RequeueAfter so the reconcile retries once the router is ready again")
+	}
+
+	if cfg.Status.Phase != vrouterv1.PhasePending {
+		t.Errorf("status.phase = %q, want %q", cfg.Status.Phase, vrouterv1.PhasePending)
+	}
+
+	cond := findAppliedCondition(cfg.Status.Conditions)
+	if cond == nil {
+		t.Fatalf("expected an Applied condition to be set")
+	}
+	if cond.Status != metav1.ConditionFalse {
+		t.Errorf("Applied condition status = %q, want %q (a stale True must not survive the router going unready)", cond.Status, metav1.ConditionFalse)
+	}
+	if cond.ObservedGeneration != 1 {
+		t.Errorf("Applied condition observedGeneration = %d, want 1", cond.ObservedGeneration)
+	}
+
+	var got vrouterv1.VRouterConfig
+	if err := cl.Get(context.Background(), k8stypes.NamespacedName{Name: "c1", Namespace: "default"}, &got); err != nil {
+		t.Fatalf("get updated config: %v", err)
+	}
+	persistedCond := findAppliedCondition(got.Status.Conditions)
+	if persistedCond == nil || persistedCond.Status != metav1.ConditionFalse {
+		t.Errorf("persisted Applied condition = %+v, want status False", persistedCond)
+	}
+}
+
+// TestHandleRouterNotReady_NotPreviouslyApplied_NoStatusPatch verifies that
+// when the config was not in the Applied phase (e.g. it is already Pending
+// or Applying), handleRouterNotReady does not touch status at all -- there
+// is no stale True condition to clear, and patching here would be
+// pointless churn.
+func TestHandleRouterNotReady_NotPreviouslyApplied_NoStatusPatch(t *testing.T) {
+	cfg := &vrouterv1.VRouterConfig{
+		ObjectMeta: metav1.ObjectMeta{Name: "c1", Namespace: "default", Generation: 1},
+		Spec: vrouterv1.VRouterConfigSpec{
+			TargetRef: vrouterv1.NameRef{Name: "r1"},
+			Config:    "set system host-name test",
+		},
+		Status: vrouterv1.VRouterConfigStatus{
+			Phase: vrouterv1.PhasePending,
+		},
+	}
+
+	r, _ := newFakeReconciler(t, cfg)
+
+	if _, err := r.handleRouterNotReady(context.Background(), cfg, fmt.Errorf("QGA not responding")); err != nil {
+		t.Fatalf("handleRouterNotReady returned error: %v", err)
+	}
+
+	if cfg.Status.Phase != vrouterv1.PhasePending {
+		t.Errorf("status.phase = %q, want unchanged %q", cfg.Status.Phase, vrouterv1.PhasePending)
+	}
+	if cond := findAppliedCondition(cfg.Status.Conditions); cond != nil {
+		t.Errorf("expected no Applied condition to be set, got %+v", cond)
 	}
 }
