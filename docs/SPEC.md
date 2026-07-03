@@ -9,7 +9,7 @@
 
 ## 1. Overview
 
-vRouter-Operator is a Kubernetes Operator that manages VyOS virtual router configuration running on virtualization platforms. Through a provider abstraction layer, it supports multiple virtualization backends (KubeVirt, Proxmox VE, etc.). The default provider is KubeVirt (same cluster), which delivers configuration via qemu-guest-agent (QGA) over a virtio channel — no network reachability or sidecar container injection required.
+vRouter-Operator is a Kubernetes Operator that manages VyOS virtual router configuration running on virtualization platforms. Through a provider abstraction layer, it supports multiple virtualization backends (KubeVirt, Proxmox VE, vrouter-daemon for bare metal or any VM, etc.). The default provider is KubeVirt (same cluster), which delivers configuration via qemu-guest-agent (QGA) over a virtio channel — no network reachability or sidecar container injection required.
 
 ---
 
@@ -129,7 +129,7 @@ metadata:
   name: site-a-routers
 spec:
   provider:
-    type: kubevirt          # kubevirt (default) | proxmox
+    type: kubevirt          # kubevirt (default) | proxmox | vrouter-daemon
     kubevirt:
       name: vyos-router-a
       namespace: production
@@ -143,7 +143,13 @@ spec:
     #   vmid: 100
     #   clusterRef:                    # references a ProxmoxCluster resource
     #     name: pve-cluster
-    #     namespace: default           # optional, defaults to same namespace
+    #     namespace: default           # optional; if set, must equal this VRouterTarget's own
+    #                                  # namespace — cross-namespace references are rejected
+    # --- vrouter-daemon example (bare metal or any VM) ---
+    # type: vrouter-daemon
+    # daemon:
+    #   address: "vrouter-daemon.vrouter-system.svc:50052"  # gRPC ControlService endpoint
+    #   agentID: "router-a"                                  # target router agent identifier
   params:                 # arbitrary structure (x-kubernetes-preserve-unknown-fields)
     asn: 65001
     routerId: "10.0.0.1"
@@ -165,6 +171,8 @@ spec:
 - `provider.type` defaults to `kubevirt` if omitted
 - For KubeVirt, `kubevirt.name` identifies the VM; defaults to same cluster; optionally specify a remote kubeconfig via Secret
 - For Proxmox, `proxmox.vmid` identifies the VM; `clusterRef` references a ProxmoxCluster resource
+- For vrouter-daemon, `daemon.address` (gRPC endpoint) and `daemon.agentID` identify the target router agent; see README.md for deployment details
+- **Same-namespace-only references**: `proxmox.clusterRef.namespace`, if set, must equal the VRouterTarget's own namespace. The validating webhook rejects a `clusterRef` pointing at a different namespace — see §6.2 for the full same-namespace policy and why it exists.
 - `params` uses `x-kubernetes-preserve-unknown-fields: true`; stored as `apiextensionsv1.JSON` in Go
 - Short names: `vrt`, `vroutertarget`
 
@@ -194,6 +202,8 @@ spec:
 
 > **Backward compatibility**: The deprecated `templateRef` field (singular, optional) is still accepted. If set, it is prepended to `templateRefs` as the highest-priority (first) template.
 
+**Same-namespace-only references**: every entry in `templateRef`, `templateRefs`, and `targetRefs` must resolve to an object in the VRouterBinding's own namespace. A `namespace` field left empty defaults to the binding's namespace (as usual); a `namespace` field set to any *other* namespace is rejected by the validating webhook. See §6.2 for the full policy.
+
 Short names: `vrb`, `vrouterbinding`
 
 ---
@@ -221,10 +231,10 @@ status:
   conditions: []
 ```
 
-- `endpoints`: multiple endpoints supported for HA Proxmox clusters; each request tries them in order
-- `credentialsRef`: references a Secret with keys `api-token-id` and `api-token-secret`
-- `syncInterval`: controls poll frequency for node tracking (default: 60s)
-- `checkGuestUptime`: when true, queries `/proc/uptime` via QGA to detect guest-initiated reboots that don't restart the QEMU process (default: true)
+- `endpoints`: multiple endpoints supported for HA Proxmox clusters; each request tries them in order. Must be non-empty; the validating webhook rejects `endpoints: []` (see §6.2).
+- `credentialsRef`: references a Secret with keys `api-token-id` and `api-token-secret`. `credentialsRef.name` must be non-empty.
+- `syncInterval`: controls poll frequency for node tracking (default: 60s). Must be greater than zero — a non-positive value would otherwise make the controller hot-poll the Proxmox API every reconcile.
+- `checkGuestUptime`: when true (default), queries `/proc/uptime` via QGA to detect guest-initiated reboots that don't restart the QEMU process. This is a pointer bool (`*bool`): leaving the field unset defaults to `true`, and an explicit `checkGuestUptime: false` is honored and disables the guest-agent uptime check (see §9.9 ProxmoxCluster Types).
 - Short names: `pxc`, `proxmoxcluster`
 
 ---
@@ -310,13 +320,17 @@ func mergeParams(base, override apiextensionsv1.JSON) (map[string]interface{}, e
 
 ### 4.3 Merge Semantics
 
+`mergo.WithOverride` is a *presence*-based merge, not a *truthiness*-based one: whether a key wins is decided by whether it is present in the override JSON, not by whether its decoded value is Go's zero value.
+
 | Case | Behavior |
 |------|----------|
-| scalar override scalar | Override replaces |
+| scalar override scalar | Override replaces base, **including when the override value is a zero value** (`false`, `""`, `0`). `mergo.WithOverride` only special-cases *nil* interface values, not JSON zero values — once `override.params` is decoded into a `map[string]interface{}`, `false`/`""`/`0` are ordinary non-nil values and always win. |
 | map override map | mergo recursive merge |
-| slice override slice | Direct replacement (no append) |
-| override sets nil | Keeps base value (mergo default does not override with nil) |
-| override missing key | Keeps base value |
+| slice override slice, non-empty | Direct replacement (no append) |
+| slice override slice, override is `[]` (present but empty) | Also replaces the base slice — `mergo.WithOverrideEmptySlice` is set specifically so an empty override list clears the base list instead of being ignored. |
+| key entirely absent from the override JSON | Keeps base value — only keys that are present in the decoded override map participate in the merge. |
+
+**Practical consequence**: there is no way to distinguish "the override explicitly set this key to false/empty/zero" from "the override didn't mention this key" once the override JSON has been decoded — both look the same to mergo except for the "is the key present at all" check above. A `target.params` (or `binding.params`) block that merely *mentions* a key, even with a zero value, silently overrides a truthy base default (e.g. a template's `firewall.enabled: true` can be turned off by a target that sets `firewall.enabled: false`, but also by any override value that happens to decode to `false`/`""`/`0`). This is intentional, pinned behavior — not a bug — and is covered by characterization tests. Template and target authors who need "leave this key alone" semantics must omit the key entirely from `params`, not set it to its zero value.
 
 ---
 
@@ -360,15 +374,29 @@ No defaulting logic is currently needed; field-level defaults are handled by kub
 
 ### 6.2 Validating Webhook
 
-Performs cross-field validation that kubebuilder JSON schema markers cannot express:
+Performs cross-field validation and reference checks that kubebuilder JSON schema markers cannot express:
 
 | Resource | Validation |
 |----------|------------|
-| VRouterTarget | `provider.kubevirt` must be set when `type=kubevirt`; `provider.proxmox` must be set when `type=proxmox`; for Proxmox, `clusterRef.name` is mandatory |
-| VRouterConfig | Same provider cross-field validation as VRouterTarget |
-| VRouterBinding | `spec.targetRefs` must not be empty |
+| VRouterTarget | `provider.kubevirt` must be set when `type=kubevirt`; `provider.proxmox` must be set when `type=proxmox`; `provider.daemon` (with non-empty `address` and `agentID`) must be set when `type=vrouter-daemon`; for Proxmox, `clusterRef.name` is mandatory and `clusterRef.namespace`, if set, must equal the VRouterTarget's own namespace (cross-namespace references are rejected) |
+| VRouterConfig | `spec.targetRef` must resolve to an existing VRouterTarget; `spec.targetRef.namespace`, if set, must equal the VRouterConfig's own namespace (cross-namespace references are rejected). VRouterConfig does **not** carry its own `provider` block, so there is no provider cross-field validation here — only the targetRef checks above. |
+| VRouterBinding | `spec.targetRefs` must not be empty; at least one of `spec.templateRef` (deprecated) or `spec.templateRefs` must be set; every entry in `spec.templateRef`, `spec.templateRefs[]`, and `spec.targetRefs[]` must resolve to an existing object, and each entry's `namespace`, if set, must equal the VRouterBinding's own namespace (cross-namespace references are rejected) |
+| VRouterTemplate | `spec.config` and `spec.commands`, when set, must each parse as valid Go `text/template` syntax (parsed with the same sprig FuncMap used at render time — see §5.1); a syntax error is rejected at admission instead of surfacing later as a render failure |
+| ProxmoxCluster | `spec.endpoints` must be non-empty, and no entry may be an empty string; `spec.syncInterval` must be greater than zero; `spec.credentialsRef.name` must be non-empty |
+
+All reference-existence and cross-namespace checks above are skipped during `ValidateUpdate` when the object already has a non-nil `deletionTimestamp`. This matters for the finalizer-removal update that every controller's `onDelete` performs (see §7): without the skip, a reference that has already been deleted (or a pre-existing cross-namespace reference — see the upgrade caveat below) would make that final update fail admission and deadlock deletion.
 
 Webhooks are disabled when `ENABLE_WEBHOOKS=false` (env var, checked in `cmd/main.go`).
+
+#### Same-namespace-only references (standing policy)
+
+`VRouterBinding.spec.templateRef` / `templateRefs` / `targetRefs`, `VRouterConfig.spec.targetRef`, and `VRouterTarget.spec.provider.proxmox.clusterRef` may only reference objects in the same namespace as the referencing object. If a reference's `namespace` field is left empty it resolves to the referencing object's own namespace (via `ResolveNamespace`, unchanged); if it is set to any *other* namespace, the validating webhook rejects the create/update.
+
+This is a **deliberate, standing design decision**, not a temporary limitation to be lifted later. Allowing an object in one namespace to reference credentials or targets in another namespace — with no authorization check beyond "the name resolves to something" — lets a tenant who can only create objects in their own namespace borrow another namespace's Proxmox API credentials or bind to another namespace's routers, and QGA `guest-exec` reaches the guest as root. Rejecting cross-namespace references at admission removes this confused-deputy path entirely, at the cost of not supporting shared credentials across namespaces.
+
+If multiple namespaces need to target VMs on the same Proxmox cluster, co-locate a `ProxmoxCluster` (and the `Secret` it references via `credentialsRef`) in **each** namespace that needs it, rather than sharing one `ProxmoxCluster` across namespaces. This duplicates the endpoint/credential object but keeps every reference same-namespace and keeps the authorization boundary aligned with Kubernetes RBAC namespace boundaries.
+
+> **Upgrade caveat**: enabling this webhook on an existing installation does not retroactively fix objects created before the webhook existed. A `VRouterBinding`, `VRouterConfig`, or `VRouterTarget` that already has a cross-namespace reference keeps working with its old (now inconsistent) behavior — the webhook only evaluates `ValidateCreate` and `ValidateUpdate`, so an existing object is not re-validated until the next time it is edited (or deleted and recreated). Operators upgrading to a version with this webhook enabled should audit existing objects for cross-namespace references (non-empty `namespace` fields in `templateRef`/`templateRefs`/`targetRefs`/`targetRef`/`clusterRef` that differ from the referencing object's own namespace) before relying on the same-namespace guarantee.
 
 ---
 
@@ -477,20 +505,35 @@ onChange():
 
   4. if execPID > 0:
        GetExecStatus(execPID)
-       → still running → requeue(3s)
-       → exitCode == 0 → clear PID, set phase=Applied, condition Applied=True, return nil
-       → exitCode != 0 → clear PID, set phase=Failed, condition Applied=False, return nil
+       → still running, within the apply timeout → requeue(3s)
+       → still running, past the apply timeout → clear execPID, set phase=Failed,
+         condition Applied=False (reason=ApplyTimeout), return nil (no retry)
+       → exec result lost (operator restarted and lost its in-memory exec
+         tracking, or the guest agent that owned the PID restarted and no
+         longer recognizes it) → clear execPID, set phase=Pending,
+         requeue(3s) so the next reconcile re-dispatches a fresh exec
+       → exitCode == 0 → clear execPID, set phase=Applied, condition Applied=True
+         (stamped with the generation this exec was dispatched for), return nil
+       → exitCode != 0 → clear execPID, set phase=Failed, condition Applied=False
+         (stamped with the generation this exec was dispatched for), return nil
 
-  5. Check reboot: if target.status.lastRebootTime > status.lastAppliedTime → force re-apply
+  5. Check reboot: force re-apply only if target.status.lastRebootTime is newer
+     than the last reboot this config has already dispatched an attempt for.
+     A single reboot forces at most one re-apply attempt — even if that
+     attempt fails — instead of re-dispatching on every reconcile.
 
-  6. if generation == observedGeneration and phase is Applied/Failed:
+  6. if generation == observedGeneration and phase is Applied/Failed and no
+     reboot force-apply is pending (step 5):
        return nil  ← already done for this generation
 
-  7. (new spec or reboot detected)
+  7. (new spec, or a reboot not yet handled)
+     set condition Applied=False (reason=Applying) for the generation about
+     to be dispatched, before the script starts running
      render internal script template
      WriteFile(script)
      pid = ExecScript()
-     set execPID=pid, observedGeneration=generation, phase=Applying
+     record dispatch time; set execPID=pid, observedGeneration=generation,
+     "last reboot handled" = target.status.lastRebootTime, phase=Applying
      return requeue(3s)
 
 onDelete():
@@ -500,14 +543,17 @@ onDelete():
 **Key semantics:**
 - `generation == observedGeneration` → exec for this spec version has been dispatched (running or finished)
 - `generation > observedGeneration` → new spec available, dispatch exec
-- `target.status.lastRebootTime > status.lastAppliedTime` → VM rebooted, force re-apply regardless of generation
-- Failed phase has no auto-retry; user updates spec (increments generation) to re-trigger
+- A target reboot newer than the last reboot this config has already attempted forces exactly one re-apply for the current generation, regardless of `observedGeneration`
+- Failed phase has no auto-retry; the config only re-dispatches when the user updates spec (new generation) or the target reboots again. A reboot-forced apply that fails does **not** get re-dispatched again for the same reboot — this closes the hot-loop that a permanently-failing render (e.g. a bad `set` command) combined with a stale reboot timestamp used to cause.
+- A dispatched apply that never exits is bounded by a fixed apply timeout; once exceeded, the config is marked Failed instead of being polled forever. There is currently no CRD field to tune this timeout per config.
+- If the previously dispatched exec's result can no longer be retrieved, the controller does not treat this as a normal error to retry indefinitely — it clears the exec handle and re-dispatches a fresh `ExecScript` call, since retrying the same (now-meaningless) handle can never succeed.
+- `Applied` is set to `False` the moment a new generation (or a reboot-forced re-apply) is dispatched — not only on failure — so `kubectl wait --for=condition=Applied` cannot return early against a stale `True` left over from a previous generation while a new apply is in flight. The condition's `observedGeneration` reflects the generation the exec was actually dispatched for, not necessarily the object's current `.metadata.generation` (which may have moved on while the script was still running).
 
 **Condition (for `kubectl wait`):**
 
 | Condition type | Status=True | Status=False |
 |----------------|-------------|--------------|
-| `Applied` | phase=Applied | phase=Failed or Applying |
+| `Applied` | phase=Applied (for the generation the exec was dispatched for) | phase=Failed (including apply-timeout), or an apply for a new generation/reboot has just been dispatched (phase=Applying) |
 
 ```bash
 kubectl wait --for=condition=Applied vrouterconfig/myconfig --timeout=60s
@@ -546,8 +592,8 @@ kubectl wait --for=condition=Applied vrouterconfig/myconfig --timeout=60s
 ```
 
 **Purpose of `proxmoxNode` and `lastRebootTime`:**
-- `proxmoxNode`: The provider factory reads this to build the Proxmox provider with the correct node name, since Proxmox QGA commands are node-scoped.
-- `lastRebootTime`: VRouterConfig controller compares this against `lastAppliedTime` to force re-apply after a reboot.
+- `proxmoxNode`: The provider factory reads this to build the Proxmox provider with the correct node name, since Proxmox QGA commands are node-scoped. Step 4a clears it to `""` (rather than leaving the previous value) when the VMID is absent from `/cluster/resources` — e.g. the VM was destroyed. Leaving a stale node cached here would otherwise let the provider factory's cached-node fallback target the wrong host if the same VMID is later reused on a different node.
+- `lastRebootTime`: VRouterController (§7.2) compares this against the last reboot it has already dispatched a forced re-apply for, to force re-apply after a reboot at most once per reboot.
 
 ---
 
@@ -732,8 +778,12 @@ type VRouterBindingSpec struct {
     // +optional
     TemplateRefs []NameRef `json:"templateRefs,omitempty"`
     TargetRefs   []NameRef `json:"targetRefs"`
+    // Save controls whether the applied configuration is persisted, and is
+    // propagated to the generated VRouterConfig.spec.save. Pointer bool so
+    // an explicit `false` is honored — see VRouterConfigSpec.Save (§9.4).
     // +kubebuilder:default=true
-    Save bool `json:"save,omitempty"`
+    // +optional
+    Save *bool `json:"save,omitempty"`
     // +kubebuilder:pruning:PreserveUnknownFields
     // +kubebuilder:validation:Schemaless
     // +optional
@@ -765,8 +815,15 @@ type VRouterConfig struct {
 type VRouterConfigSpec struct {
     // TargetRef references the VRouterTarget that describes the provider and router.
     TargetRef NameRef `json:"targetRef"`
+    // Save controls whether the applied configuration is persisted so it survives
+    // a reboot. Save is a pointer bool: nil (field absent) defaults to true via
+    // +kubebuilder:default=true, but an explicit `false` is honored. A plain
+    // `bool` cannot represent this — Go's JSON encoder omits a `false` value
+    // when the field has `omitempty`, so the API server would re-apply the
+    // default and silently turn an explicit `save: false` back into `true`.
     // +kubebuilder:default=true
-    Save bool `json:"save,omitempty"`
+    // +optional
+    Save *bool `json:"save,omitempty"`
     // +optional
     Config string `json:"config,omitempty"`
     // +optional
@@ -779,15 +836,28 @@ type VRouterConfigStatus struct {
     Phase string `json:"phase,omitempty"`
     // +optional
     ExecPID int64 `json:"execPID,omitempty"`
+    // ExecStartedTime records when the current execPID was dispatched, so the
+    // controller can bound how long it polls before failing the config
+    // instead of waiting forever (§7.2).
+    // +optional
+    ExecStartedTime *metav1.Time `json:"execStartedTime,omitempty"`
     // +optional
     LastAppliedTime *metav1.Time `json:"lastAppliedTime,omitempty"`
+    // LastRebootHandledTime records the VRouterTarget.Status.LastRebootTime
+    // value this config has already dispatched a reboot-forced apply attempt
+    // for, so a single reboot forces at most one re-apply (§7.2) instead of
+    // hot-looping when that attempt fails.
+    // +optional
+    LastRebootHandledTime *metav1.Time `json:"lastRebootHandledTime,omitempty"`
     // +optional
     Message string `json:"message,omitempty"`
     // ObservedGeneration is the generation for which exec was last dispatched.
     // +optional
     ObservedGeneration int64 `json:"observedGeneration,omitempty"`
     // Conditions for kubectl wait support. The "Applied" condition is True
-    // when phase=Applied and False when phase=Failed or Applying.
+    // when phase=Applied for the dispatched generation, and False both when
+    // phase=Failed and while a new generation/reboot-forced apply is in
+    // flight (phase=Applying) — see §7.2.
     // +optional
     Conditions []metav1.Condition `json:"conditions,omitempty"`
 }
@@ -804,12 +874,13 @@ type NameRef struct {
     Name      string `json:"name"`
 }
 
-// +kubebuilder:validation:Enum=kubevirt;proxmox
+// +kubebuilder:validation:Enum=kubevirt;proxmox;vrouter-daemon
 type ProviderType string
 
 const (
-    ProviderKubeVirt ProviderType = "kubevirt"
-    ProviderProxmox  ProviderType = "proxmox"
+    ProviderKubeVirt      ProviderType = "kubevirt"
+    ProviderProxmox       ProviderType = "proxmox"
+    ProviderVRouterDaemon ProviderType = "vrouter-daemon"
 )
 
 type ProviderConfig struct {
@@ -820,6 +891,8 @@ type ProviderConfig struct {
     KubeVirt *KubeVirtConfig `json:"kubevirt,omitempty"`
     // +optional
     Proxmox  *ProxmoxConfig  `json:"proxmox,omitempty"`
+    // +optional
+    Daemon   *DaemonConfig   `json:"daemon,omitempty"`
 }
 
 type SecretKeyRef struct {
@@ -862,7 +935,28 @@ type ProxmoxConfig struct {
 }
 ```
 
-### 9.8 ProxmoxCluster Types
+### 9.8 Daemon Types
+
+```go
+const ProviderVRouterDaemon ProviderType = "vrouter-daemon"
+
+// DaemonConfig holds vrouter-daemon ControlService connection parameters.
+type DaemonConfig struct {
+    // Address is the gRPC endpoint of the vrouter-daemon ControlService
+    // (e.g., "vrouter-server.default.svc:9090").
+    Address string `json:"address"`
+    // AgentID is the identifier of the target router agent.
+    AgentID string `json:"agentID"`
+    // TimeoutSeconds is the maximum time to wait for a config apply to complete.
+    // +optional
+    // +kubebuilder:default=60
+    TimeoutSeconds int32 `json:"timeoutSeconds,omitempty"`
+}
+```
+
+The vrouter-daemon provider targets bare metal or any VM without KubeVirt or Proxmox VE, via a gRPC agent that connects back to a server deployed in the cluster. See README.md for deployment and the required Redis-backed server component; it is otherwise out of scope for this design doc, which focuses on the operator's controller/webhook/CRD layer.
+
+### 9.9 ProxmoxCluster Types
 
 ```go
 //+kubebuilder:object:root=true
@@ -880,18 +974,25 @@ type ProxmoxCluster struct {
 
 type ProxmoxClusterSpec struct {
     // Endpoints tried in order until one responds (HA cluster support).
+    // Validated non-empty by the validating webhook (§6.2).
     Endpoints []string `json:"endpoints"`
     // Reference to a Secret containing api-token-id and api-token-secret.
+    // CredentialsRef.Name validated non-empty by the validating webhook (§6.2).
     CredentialsRef SecretReference `json:"credentialsRef"`
     // +kubebuilder:default=false
     // +optional
     InsecureSkipTLSVerify bool `json:"insecureSkipTLSVerify,omitempty"`
+    // SyncInterval controls poll frequency. Validated > 0 by the validating
+    // webhook (§6.2); a non-positive value would otherwise make the
+    // controller re-sync on every reconcile instead of waiting.
     // +kubebuilder:default="60s"
     // +optional
     SyncInterval metav1.Duration `json:"syncInterval,omitempty"`
+    // CheckGuestUptime is a pointer bool so an explicit `false` is honored
+    // (nil defaults to true) — same rationale as VRouterConfigSpec.Save (§9.4).
     // +kubebuilder:default=true
     // +optional
-    CheckGuestUptime bool `json:"checkGuestUptime,omitempty"`
+    CheckGuestUptime *bool `json:"checkGuestUptime,omitempty"`
 }
 
 type ProxmoxClusterStatus struct {
@@ -902,7 +1003,7 @@ type ProxmoxClusterStatus struct {
 }
 ```
 
-### 9.9 Constants
+### 9.10 Constants
 
 ```go
 const (
@@ -923,7 +1024,7 @@ const ConditionApplied = "Applied"  // VRouterConfig
 const ConditionReady   = "Ready"    // VRouterBinding
 ```
 
-### 9.10 QGA Constants
+### 9.11 QGA Constants
 
 ```go
 const (
