@@ -28,5 +28,6 @@ type DaemonConfig struct {
 	// TimeoutSeconds is the maximum time to wait for a config apply to complete.
 	// +optional
 	// +kubebuilder:default=60
+	// +kubebuilder:validation:Minimum=1
 	TimeoutSeconds int32 `json:"timeoutSeconds,omitempty"`
 }

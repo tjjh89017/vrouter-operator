@@ -21,6 +21,7 @@ const ProviderProxmox ProviderType = "proxmox"
 // ProxmoxConfig holds Proxmox VE provider configuration and router identification.
 type ProxmoxConfig struct {
 	// VMID of the virtual machine on Proxmox.
+	// +kubebuilder:validation:Minimum=100
 	VMID int `json:"vmid"`
 	// ClusterRef references a ProxmoxCluster resource that holds endpoint and credentials.
 	// Namespace may be omitted to use the same namespace as the VRouterTarget.

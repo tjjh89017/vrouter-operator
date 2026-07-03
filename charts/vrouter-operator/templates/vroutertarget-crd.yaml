@@ -71,6 +71,7 @@ spec:
                         description: TimeoutSeconds is the maximum time to wait for
                           a config apply to complete.
                         format: int32
+                        minimum: 1
                         type: integer
                     required:
                     - address
@@ -125,6 +126,7 @@ spec:
                         type: object
                       vmid:
                         description: VMID of the virtual machine on Proxmox.
+                        minimum: 100
                         type: integer
                     required:
                     - clusterRef
