@@ -113,13 +113,48 @@ func (r *VRouterConfigReconciler) onChange(ctx context.Context, _ ctrl.Request, 
 		return ctrl.Result{}, nil
 	}
 
+	return r.checkReadyAndDispatch(ctx, cfg, prov, &target)
+}
+
+// checkReadyAndDispatch implements steps 1-3 of onChange: the CheckReady
+// pre-check, followed by dispatch-or-poll. It is factored out of onChange,
+// like dispatchOrPoll, so it can be exercised directly in tests with a fake
+// Provider, without needing a real provider.New target (which performs live
+// network calls in CheckReady/IsVMRunning).
+func (r *VRouterConfigReconciler) checkReadyAndDispatch(ctx context.Context, cfg *vrouterv1.VRouterConfig, prov provider.Provider, target *vrouterv1.VRouterTarget) (ctrl.Result, error) {
+	// Backfill execStartedTime for an in-flight exec that predates the field
+	// (see stampExecStartedTimeIfMissing) before either branch below reads
+	// it, so both the CheckReady-failure timeout check and pollExecStatus's
+	// own timeout check always have a start time to measure against.
+	if err := r.stampExecStartedTimeIfMissing(ctx, cfg); err != nil {
+		return ctrl.Result{}, err
+	}
+
 	// Step 1: pre-check — QGA ping + vyos-router.service is-active.
 	if err := prov.CheckReady(ctx); err != nil {
-		return r.handleRouterNotReady(ctx, cfg, err)
+		return r.handleCheckReadyFailure(ctx, cfg, err)
 	}
 
 	// Steps 2-3: poll a running script, or decide whether to (re-)dispatch.
-	return r.dispatchOrPoll(ctx, cfg, prov, &target)
+	return r.dispatchOrPoll(ctx, cfg, prov, target)
+}
+
+// stampExecStartedTimeIfMissing backfills status.execStartedTime for an
+// in-flight exec (execPID > 0) that has none recorded. This is an upgrade
+// edge: a config left mid-apply by a controller version that predates the
+// execStartedTime field would otherwise have no start time to measure the
+// apply timeout against — in either handleCheckReadyFailure or
+// pollExecStatus — and so would never time out. Stamping "now" starts the
+// clock late rather than never; the exec is bounded by execApplyTimeout from
+// this point on.
+func (r *VRouterConfigReconciler) stampExecStartedTimeIfMissing(ctx context.Context, cfg *vrouterv1.VRouterConfig) error {
+	if cfg.Status.ExecPID == 0 || cfg.Status.ExecStartedTime != nil {
+		return nil
+	}
+	now := metav1.Now()
+	patch := client.MergeFrom(cfg.DeepCopy())
+	cfg.Status.ExecStartedTime = &now
+	return r.Status().Patch(ctx, cfg, patch)
 }
 
 // dispatchOrPoll implements steps 2-3 of onChange: if a script is already
@@ -173,10 +208,37 @@ func shouldForceReapplyForReboot(lastRebootHandledTime, targetLastRebootTime *me
 	return lastRebootHandledTime.Before(targetLastRebootTime)
 }
 
-// handleRouterNotReady is step 1's failure path: the router did not pass
-// CheckReady (QGA unreachable, or vyos-router.service not yet up — commonly
-// because the VM is mid-reboot). It is factored out of onChange so it can be
-// exercised directly in tests without a real provider.
+// handleCheckReadyFailure is step 1's failure path, called by
+// checkReadyAndDispatch whenever CheckReady returns an error. It is factored
+// out of checkReadyAndDispatch so it can be exercised directly in tests
+// without a real provider.
+//
+// If an exec is in flight (status.execPID > 0) and it has been running
+// longer than execApplyTimeout, the router being unreachable does not
+// excuse the apply from its timeout: without this check, a persistently
+// failing CheckReady would return early on every reconcile and
+// dispatchOrPoll/pollExecStatus — which normally owns the apply-timeout
+// evaluation — would never run, pinning the config in Applying forever
+// against a dead router even though the timeout clock (execStartedTime)
+// exists. In that case this delegates to the same failApplyTimeout helper
+// pollExecStatus uses, so both timeout triggers converge on identical
+// status/condition semantics. Otherwise (not yet timed out, or no exec in
+// flight), this falls through to the pre-existing handleRouterNotReady
+// behavior unchanged.
+func (r *VRouterConfigReconciler) handleCheckReadyFailure(ctx context.Context, cfg *vrouterv1.VRouterConfig, checkReadyErr error) (ctrl.Result, error) {
+	if cfg.Status.ExecPID > 0 && cfg.Status.ExecStartedTime != nil &&
+		time.Since(cfg.Status.ExecStartedTime.Time) > execApplyTimeout {
+		msg := fmt.Sprintf("apply timed out after %s (router unreachable: %s)", execApplyTimeout, checkReadyErr.Error())
+		return r.failApplyTimeout(ctx, cfg, msg)
+	}
+	return r.handleRouterNotReady(ctx, cfg, checkReadyErr)
+}
+
+// handleRouterNotReady handles a CheckReady failure that is not (yet) an
+// apply timeout: the router did not pass CheckReady (QGA unreachable, or
+// vyos-router.service not yet up — commonly because the VM is mid-reboot).
+// It is factored out of checkReadyAndDispatch so it can be exercised
+// directly in tests without a real provider.
 //
 // If the config was previously Applied, that result can no longer be
 // trusted: phase resets to Pending so the generation check in dispatchOrPoll
@@ -210,6 +272,30 @@ func (r *VRouterConfigReconciler) handleRouterNotReady(ctx context.Context, cfg 
 func (r *VRouterConfigReconciler) onDelete(ctx context.Context, _ ctrl.Request, cfg *vrouterv1.VRouterConfig) (ctrl.Result, error) {
 	controllerutil.RemoveFinalizer(cfg, vrouterv1.FinalizerName)
 	return ctrl.Result{}, r.Update(ctx, cfg)
+}
+
+// failApplyTimeout transitions cfg to Failed with reason ApplyTimeout,
+// clearing the exec handle so a later generation change or reboot can
+// dispatch a fresh attempt through the normal path, and does NOT requeue for
+// retry (Failed has no auto-retry, same as any other apply failure). It is
+// shared by pollExecStatus (an in-flight exec that has produced no result
+// within execApplyTimeout) and handleCheckReadyFailure (the router itself
+// has been unreachable past execApplyTimeout while an exec was in flight) so
+// both timeout triggers converge on identical status/condition semantics.
+func (r *VRouterConfigReconciler) failApplyTimeout(ctx context.Context, cfg *vrouterv1.VRouterConfig, msg string) (ctrl.Result, error) {
+	patch := client.MergeFrom(cfg.DeepCopy())
+	cfg.Status.ExecPID = 0
+	cfg.Status.ExecStartedTime = nil
+	cfg.Status.Phase = vrouterv1.PhaseFailed
+	cfg.Status.Message = msg
+	meta.SetStatusCondition(&cfg.Status.Conditions, metav1.Condition{
+		Type:               vrouterv1.ConditionApplied,
+		Status:             metav1.ConditionFalse,
+		Reason:             "ApplyTimeout",
+		Message:            cfg.Status.Message,
+		ObservedGeneration: cfg.Status.ObservedGeneration,
+	})
+	return ctrl.Result{}, r.Status().Patch(ctx, cfg, patch)
 }
 
 // pollExecStatus checks the running script and updates status accordingly.
@@ -263,19 +349,7 @@ func (r *VRouterConfigReconciler) pollExecStatus(ctx context.Context, cfg *vrout
 				msg = fmt.Sprintf("apply timed out after %s (last error polling exec status: %s)", execApplyTimeout, err.Error())
 			}
 			log.Info("apply exec timed out, marking failed", "pid", cfg.Status.ExecPID, "startedAt", execStarted.Time, "timeout", execApplyTimeout, "lastPollErr", err)
-			patch := client.MergeFrom(cfg.DeepCopy())
-			cfg.Status.ExecPID = 0
-			cfg.Status.ExecStartedTime = nil
-			cfg.Status.Phase = vrouterv1.PhaseFailed
-			cfg.Status.Message = msg
-			meta.SetStatusCondition(&cfg.Status.Conditions, metav1.Condition{
-				Type:               vrouterv1.ConditionApplied,
-				Status:             metav1.ConditionFalse,
-				Reason:             "ApplyTimeout",
-				Message:            cfg.Status.Message,
-				ObservedGeneration: cfg.Status.ObservedGeneration,
-			})
-			return ctrl.Result{}, r.Status().Patch(ctx, cfg, patch)
+			return r.failApplyTimeout(ctx, cfg, msg)
 		}
 
 		if err != nil {
