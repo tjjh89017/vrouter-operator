@@ -2,7 +2,7 @@
 
 A Kubernetes Operator that manages the virtual router configuration running on KubeVirt, Proxmox VE, or bare-metal via the vrouter-daemon gRPC agent. Configuration is delivered via QEMU Guest Agent (QGA) over a virtio channel or gRPC - no network reachability or sidecar injection required.
 
-vRouter-Operator is a community project for managing virtual routers on Kubernetes/KubeVirt.
+vRouter-Operator is a community project for managing virtual routers across Kubernetes/KubeVirt, Proxmox VE, and bare-metal deployments.
 
 ## Demo
 
@@ -43,7 +43,7 @@ Controller                    Controller
                               VRouterConfig Controller
                               → resolve VRouterTarget (provider info)
                               → check VM running (skip if stopped)
-                              → wait for vyos-router.service active
+                              → wait for the router's config service to be ready
                               → deliver config via QGA or gRPC
                               → update status (phase, conditions)
 ```
@@ -67,21 +67,7 @@ Controller                    Controller
   - Proxmox VE cluster accessible for the `proxmox` provider
   - [vrouter-daemon](https://github.com/tjjh89017/vrouter-daemon) deployed for the `vrouter-daemon` provider
 - cert-manager (for webhook TLS)
-- VyOS VM image with `qemu-guest-agent` installed (no `cloud-init` needed)
-
-### Build VyOS image
-
-```toml
-# VyOS image build flavor
-image_format = "qcow2"
-image_opts = "-c"
-disk_size = 4
-packages = ["qemu-guest-agent"]
-
-[boot_settings]
-    console_type = "tty"
-    console_num = '0'
-```
+- A router VM image with `qemu-guest-agent` installed (no `cloud-init` needed) — required for the `kubevirt` and `proxmox` providers, which deliver configuration over QGA. See [docs/SPEC.md §7.4-7.5](docs/SPEC.md) for exactly how config is applied inside the guest.
 
 ---
 
@@ -115,6 +101,11 @@ helm install vrouter-operator ./charts/vrouter-operator \
 helm install vrouter-operator ./charts/vrouter-operator \
   --namespace vrouter-system --create-namespace \
   --set controllerManager.manager.args="{--metrics-bind-address=:8443,--leader-elect,--health-probe-bind-address=:8081,--enable-webhooks=false}"
+
+# Pull from a private registry
+helm install vrouter-operator ./charts/vrouter-operator \
+  --namespace vrouter-system --create-namespace \
+  --set imagePullSecrets[0].name=my-registry-secret
 ```
 
 #### Upgrade
@@ -137,6 +128,13 @@ make install          # install CRDs into current cluster
 make deploy           # deploys ghcr.io/tjjh89017/vrouter-operator:latest by default
 # or pin a version:
 make deploy IMG=ghcr.io/tjjh89017/vrouter-operator:v0.1.0
+```
+
+### Single YAML
+
+```bash
+make build-installer IMG=ghcr.io/tjjh89017/vrouter-operator:v0.1.0   # writes dist/install.yaml
+kubectl apply -f dist/install.yaml
 ```
 
 ---
@@ -173,16 +171,16 @@ spec:
 apiVersion: vrouter.kojuro.date/v1
 kind: VRouterTarget
 metadata:
-  name: vyos-kubevirt
+  name: router-kubevirt
   namespace: default
 spec:
   provider:
     type: kubevirt
     kubevirt:
-      name: vyos-kubevirt   # VirtualMachine name
+      name: router-kubevirt   # VirtualMachine name
       namespace: default
   params:
-    hostname: "my-vyos-router"
+    hostname: "my-router"
 ```
 
 **Proxmox VE** (requires a `ProxmoxCluster`, see below):
@@ -191,7 +189,7 @@ spec:
 apiVersion: vrouter.kojuro.date/v1
 kind: VRouterTarget
 metadata:
-  name: vyos-proxmox
+  name: router-proxmox
   namespace: default
 spec:
   provider:
@@ -202,7 +200,7 @@ spec:
         name: pve-cluster
         namespace: default
   params:
-    hostname: "my-vyos-router"
+    hostname: "my-router"
 ```
 
 **vrouter-daemon** (bare metal or any VM with daemon installed):
@@ -211,7 +209,7 @@ spec:
 apiVersion: vrouter.kojuro.date/v1
 kind: VRouterTarget
 metadata:
-  name: vyos-daemon
+  name: router-daemon
   namespace: default
 spec:
   provider:
@@ -220,7 +218,7 @@ spec:
       address: "vrouter-daemon.vrouter-system.svc:50052"
       agentID: "7dea4734a47e49b0952457b684587e7c"
   params:
-    hostname: "my-vyos-router"
+    hostname: "my-router"
 ```
 
 ### 4. Create a VRouterBinding
@@ -238,9 +236,9 @@ spec:
     - name: hostname-template
   save: true          # persist config after commit (default: true)
   targetRefs:
-    - name: vyos-kubevirt
-    - name: vyos-proxmox
-    - name: vyos-daemon
+    - name: router-kubevirt
+    - name: router-proxmox
+    - name: router-daemon
 ```
 
 The operator will automatically create a `VRouterConfig` for each target and apply it to the VM via QGA or gRPC.
@@ -251,7 +249,7 @@ The operator will automatically create a `VRouterConfig` for each target and app
 kubectl get vrc                  # or: kubectl get vrouterconfig
 kubectl get vrt                  # check vmRunning column
 kubectl get vrb                  # or: kubectl get vrouterbinding
-kubectl wait vrc/hostname-binding.vyos-kubevirt --for=condition=Applied
+kubectl wait vrc/hostname-binding.router-kubevirt --for=condition=Applied
 ```
 
 ---
@@ -308,14 +306,14 @@ When a reboot is detected, `VRouterTarget.status.lastRebootTime` is updated and 
 
 ```bash
 kubectl wait --for=condition=Synced proxmoxcluster/pve-cluster --timeout=120s
-kubectl get vrt vyos-proxmox -o jsonpath='{.status.proxmoxNode}'
+kubectl get vrt router-proxmox -o jsonpath='{.status.proxmoxNode}'
 ```
 
 ---
 
 ## vrouter-daemon Provider
 
-The `vrouter-daemon` provider enables managing VyOS routers on **bare metal or any VM** without KubeVirt or Proxmox VE. It uses the [vrouter-daemon](https://github.com/tjjh89017/vrouter-daemon) gRPC agent, which runs on the VyOS host and connects back to a server deployed in Kubernetes.
+The `vrouter-daemon` provider enables managing virtual routers on **bare metal or any VM** without KubeVirt or Proxmox VE. It uses the [vrouter-daemon](https://github.com/tjjh89017/vrouter-daemon) gRPC agent, which runs on the router host and connects back to a server deployed in Kubernetes.
 
 ### Architecture
 
@@ -329,15 +327,15 @@ vrouter-operator               vrouter-server (k8s)
                                │  AgentService (port 50051)   │
                                └─────────┬────────────────────┘
                                          │ gRPC bidir stream
-                                   ┌─────┴──────┐
-                                   │ VyOS agents │  (bare metal)
-                                   └────────────┘
+                                   ┌───────┴───────┐
+                                   │ router agents │  (bare metal)
+                                   └───────────────┘
 ```
 
 - **vrouter-server** — runs in Kubernetes; two services:
   - `ControlService` (ClusterIP `:50052`) — operator-facing: `IsConnected`, `ApplyConfig`
   - `AgentService` (NodePort `30051`) — agent-facing bidirectional stream
-- **vrouter-agent** — runs on VyOS host; connects to `AgentService` and executes config pushes locally
+- **vrouter-agent** — runs on router host; connects to `AgentService` and executes config pushes locally
 - **Redis** (HA via Sentinel) — brokers config payloads between server replicas and agents
 
 ### Deploy vrouter-server
@@ -350,7 +348,7 @@ kubectl apply -f deploy/kubernetes/vrouter-daemon.yaml
 
 Creates in `vrouter-system` namespace: Redis HA (3+3 Sentinel), vrouter-daemon deployment (2 replicas), ClusterIP service for the operator, NodePort service for agents.
 
-### Install vrouter-agent on VyOS
+### Install vrouter-agent on the router host
 
 Download the `.deb` from the [latest release](https://github.com/tjjh89017/vrouter-daemon/releases/latest):
 
@@ -387,17 +385,17 @@ You can override it with `--agent-id` or the `AGENT_ID` environment variable in 
 apiVersion: vrouter.kojuro.date/v1
 kind: VRouterTarget
 metadata:
-  name: vyos-daemon
+  name: router-daemon
   namespace: default
 spec:
   provider:
     type: vrouter-daemon
     daemon:
       address: "vrouter-daemon.vrouter-system.svc:50052"  # ClusterIP service
-      agentID: "7dea4734a47e49b0952457b684587e7c"         # /etc/machine-id on VyOS host
+      agentID: "7dea4734a47e49b0952457b684587e7c"         # /etc/machine-id on router host
       timeoutSeconds: 60                                   # optional, default 60
   params:
-    hostname: "my-vyos-router"
+    hostname: "my-router"
 ```
 
 ### VM running detection
@@ -439,7 +437,7 @@ When `vmRunning` changes from `false` to `true`, all referencing `VRouterConfig`
 
 ```bash
 kubectl get vrt                  # shows VM Running column
-kubectl get vrt vyos-kubevirt -o jsonpath='{.status.vmRunning}'
+kubectl get vrt router-kubevirt -o jsonpath='{.status.vmRunning}'
 ```
 
 ---
@@ -456,10 +454,10 @@ metadata:
   namespace: default
 spec:
   targetRef:
-    name: vyos-kubevirt
+    name: router-kubevirt
   save: true
   commands: |
-    set system host-name 'my-vyos-router'
+    set system host-name 'my-router'
 ```
 
 ---
@@ -471,6 +469,18 @@ When a `VRouterBinding` has both `params` and its `VRouterTarget` has `params`, 
 ```
 final params = binding.params ← target.params
 ```
+
+---
+
+## Validation
+
+The validating webhook enforces rules that the CRD schema alone can't express — see [docs/SPEC.md §6.2](docs/SPEC.md) for the full list. The most common ones you'll hit:
+
+- Every `templateRef`/`templateRefs`/`targetRefs`/`clusterRef` must point to an object that exists **in the same namespace** as the object referencing it — cross-namespace references are rejected.
+- A `VRouterTarget` cannot be deleted while any `VRouterBinding` or `VRouterConfig` in the same namespace still references it.
+- `VRouterTemplate.spec.config`/`commands` must parse as valid `text/template` syntax at admission time, not just at render time.
+
+Webhooks require cert-manager for TLS (see [Installation](#installation)) and can be disabled with `--enable-webhooks=false` (dev/testing only — disables all of the above validation).
 
 ---
 
@@ -523,9 +533,16 @@ ENABLE_WEBHOOKS=false go run ./cmd/main.go
 # Run tests
 make test
 
-# After modifying api/v1/ types
+# Lint / format
+make fmt
+make vet
+make lint
+
+# After modifying api/v1/ types or kubebuilder markers
 make generate   # regenerate zz_generated.deepcopy.go
 make manifests  # regenerate CRDs and RBAC
 ```
+
+See [docs/SPEC.md](docs/SPEC.md) for the full design (controller reconcile flows, provider interface, params merge semantics, template engine, and webhook validation rules).
 
 > All commits require DCO sign-off: `git commit -s`
