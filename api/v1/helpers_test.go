@@ -55,3 +55,48 @@ func TestResolveNamespace(t *testing.T) {
 		})
 	}
 }
+
+func TestBoolValue(t *testing.T) {
+	trueVal := true
+	falseVal := false
+
+	tests := []struct {
+		name string
+		p    *bool
+		def  bool
+		want bool
+	}{
+		{
+			name: "nil pointer falls back to default true",
+			p:    nil,
+			def:  true,
+			want: true,
+		},
+		{
+			name: "nil pointer falls back to default false",
+			p:    nil,
+			def:  false,
+			want: false,
+		},
+		{
+			name: "explicit false is preserved even when default is true",
+			p:    &falseVal,
+			def:  true,
+			want: false,
+		},
+		{
+			name: "explicit true is preserved even when default is false",
+			p:    &trueVal,
+			def:  false,
+			want: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := BoolValue(tt.p, tt.def)
+			if got != tt.want {
+				t.Errorf("BoolValue() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}

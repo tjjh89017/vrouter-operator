@@ -200,7 +200,7 @@ func (r *VRouterConfigReconciler) pollExecStatus(ctx context.Context, cfg *vrout
 func (r *VRouterConfigReconciler) applyConfig(ctx context.Context, cfg *vrouterv1.VRouterConfig, prov provider.Provider) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
-	pid, err := prov.ExecScript(ctx, cfg.Spec.Config, cfg.Spec.Commands, cfg.Spec.Save)
+	pid, err := prov.ExecScript(ctx, cfg.Spec.Config, cfg.Spec.Commands, vrouterv1.BoolValue(cfg.Spec.Save, true))
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("exec script: %w", err)
 	}

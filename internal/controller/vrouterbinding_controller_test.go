@@ -145,4 +145,83 @@ var _ = Describe("VRouterBinding Controller", func() {
 			Expect(refs[1].Namespace).To(Equal("ns-b"))
 		})
 	})
+
+	Context("Save field propagation to generated VRouterConfig", func() {
+		var target *vrouterv1.VRouterTarget
+
+		BeforeEach(func() {
+			target = &vrouterv1.VRouterTarget{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "save-test-target",
+					Namespace: "default",
+				},
+				Spec: vrouterv1.VRouterTargetSpec{
+					Provider: vrouterv1.ProviderConfig{
+						Type:     vrouterv1.ProviderKubeVirt,
+						KubeVirt: &vrouterv1.KubeVirtConfig{Name: "save-test-vm"},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, target)).To(Succeed())
+		})
+
+		AfterEach(func() {
+			Expect(k8sClient.Delete(ctx, target)).To(Succeed())
+		})
+
+		// generatedConfigFor runs onChange directly and fetches the generated VRouterConfig.
+		generatedConfigFor := func(binding *vrouterv1.VRouterBinding) *vrouterv1.VRouterConfig {
+			reconciler := &VRouterBindingReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+			_, err := reconciler.onChange(ctx, reconcile.Request{}, binding)
+			Expect(err).NotTo(HaveOccurred())
+
+			cfg := &vrouterv1.VRouterConfig{}
+			cfgName := binding.Name + "." + target.Name
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: cfgName, Namespace: "default"}, cfg)).To(Succeed())
+			return cfg
+		}
+
+		It("should keep an explicit save:false on the generated VRouterConfig", func() {
+			falseVal := false
+			binding := &vrouterv1.VRouterBinding{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "save-false-binding",
+					Namespace: "default",
+				},
+				Spec: vrouterv1.VRouterBindingSpec{
+					TargetRefs: []vrouterv1.NameRef{{Name: target.Name}},
+					Save:       &falseVal,
+				},
+			}
+			Expect(k8sClient.Create(ctx, binding)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, binding) }()
+
+			cfg := generatedConfigFor(binding)
+			Expect(cfg.Spec.Save).NotTo(BeNil())
+			Expect(*cfg.Spec.Save).To(BeFalse())
+		})
+
+		It("should apply the CRD default (save:true) when the binding leaves save unset", func() {
+			binding := &vrouterv1.VRouterBinding{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "save-unset-binding",
+					Namespace: "default",
+				},
+				Spec: vrouterv1.VRouterBindingSpec{
+					TargetRefs: []vrouterv1.NameRef{{Name: target.Name}},
+				},
+			}
+			// Save is nil at this point: the binding controller must propagate
+			// nil (not force a value) so the generated VRouterConfig's own
+			// save,omitempty field is omitted from the request and the
+			// apiserver's +kubebuilder:default=true fills it in.
+			Expect(binding.Spec.Save).To(BeNil())
+			Expect(k8sClient.Create(ctx, binding)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, binding) }()
+
+			cfg := generatedConfigFor(binding)
+			Expect(cfg.Spec.Save).NotTo(BeNil())
+			Expect(*cfg.Spec.Save).To(BeTrue())
+		})
+	})
 })
