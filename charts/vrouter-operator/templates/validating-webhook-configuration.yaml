@@ -11,7 +11,7 @@ webhooks:
   - v1
   clientConfig:
     service:
-      name: '{{ include "vrouter-operator.fullname" . }}-webhook-service'
+      name: '{{ include "vrouter-operator.webhookServiceName" . }}'
       namespace: '{{ .Release.Namespace }}'
       path: /validate-vrouter-kojuro-date-v1-proxmoxcluster
   failurePolicy: Fail
@@ -31,7 +31,7 @@ webhooks:
   - v1
   clientConfig:
     service:
-      name: '{{ include "vrouter-operator.fullname" . }}-webhook-service'
+      name: '{{ include "vrouter-operator.webhookServiceName" . }}'
       namespace: '{{ .Release.Namespace }}'
       path: /validate-vrouter-kojuro-date-v1-vrouterbinding
   failurePolicy: Fail
@@ -51,7 +51,7 @@ webhooks:
   - v1
   clientConfig:
     service:
-      name: '{{ include "vrouter-operator.fullname" . }}-webhook-service'
+      name: '{{ include "vrouter-operator.webhookServiceName" . }}'
       namespace: '{{ .Release.Namespace }}'
       path: /validate-vrouter-kojuro-date-v1-vrouterconfig
   failurePolicy: Fail
@@ -71,7 +71,7 @@ webhooks:
   - v1
   clientConfig:
     service:
-      name: '{{ include "vrouter-operator.fullname" . }}-webhook-service'
+      name: '{{ include "vrouter-operator.webhookServiceName" . }}'
       namespace: '{{ .Release.Namespace }}'
       path: /validate-vrouter-kojuro-date-v1-vroutertarget
   failurePolicy: Fail
@@ -92,7 +92,7 @@ webhooks:
   - v1
   clientConfig:
     service:
-      name: '{{ include "vrouter-operator.fullname" . }}-webhook-service'
+      name: '{{ include "vrouter-operator.webhookServiceName" . }}'
       namespace: '{{ .Release.Namespace }}'
       path: /validate-vrouter-kojuro-date-v1-vroutertemplate
   failurePolicy: Fail
