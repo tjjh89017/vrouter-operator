@@ -36,4 +36,6 @@ jobs:
         run: make manifests generate
 
       - name: Check for uncommitted changes
-        run: git diff --exit-code
+        run: |
+          git add -N .
+          git diff --exit-code
