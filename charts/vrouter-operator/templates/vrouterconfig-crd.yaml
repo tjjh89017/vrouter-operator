@@ -59,6 +59,9 @@ spec:
                 type: string
               save:
                 default: true
+                description: |-
+                  Save controls whether the applied configuration is persisted so it
+                  survives a reboot. Defaults to true when unset.
                 type: boolean
               targetRef:
                 description: TargetRef references the VRouterTarget that describes the
@@ -139,7 +142,25 @@ spec:
               execPID:
                 format: int64
                 type: integer
+              execStartedTime:
+                description: |-
+                  ExecStartedTime records when the current execPID was dispatched. It
+                  bounds how long an in-flight apply may run: if the exec has not exited
+                  within the controller's apply timeout, the config is failed instead of
+                  being polled forever. It is cleared whenever execPID is cleared.
+                format: date-time
+                type: string
               lastAppliedTime:
+                format: date-time
+                type: string
+              lastRebootHandledTime:
+                description: |-
+                  LastRebootHandledTime records the VRouterTarget.Status.LastRebootTime
+                  value that this VRouterConfig has already dispatched a reboot-forced
+                  apply for. It is stamped at dispatch time (whether the apply succeeds
+                  or fails) so a single reboot forces at most one re-apply attempt; a
+                  failing apply does not get re-dispatched forever. A newer
+                  LastRebootTime than this value still forces exactly one fresh re-apply.
                 format: date-time
                 type: string
               message:

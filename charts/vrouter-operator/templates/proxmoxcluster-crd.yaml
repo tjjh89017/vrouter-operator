@@ -63,6 +63,7 @@ spec:
                   not restart the QEMU process and therefore cannot be detected from Proxmox
                   cluster resource uptime alone.
                   Requires QEMU Guest Agent to be running in the VM.
+                  Defaults to true when unset.
                 type: boolean
               credentialsRef:
                 description: Reference to a Secret containing api-token-id and api-token-secret.

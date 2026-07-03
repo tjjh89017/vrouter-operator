@@ -12,7 +12,9 @@ controllerManager:
         - ALL
     image:
       repository: ghcr.io/tjjh89017/vrouter-operator
-      tag: latest
+      # Defaults to .Chart.AppVersion when empty; override to pin a specific image tag.
+      tag: ""
+    imagePullPolicy: IfNotPresent
     resources:
       limits:
         cpu: 500m
@@ -28,6 +30,7 @@ controllerManager:
   replicas: 1
   tolerations: []
   topologySpreadConstraints: []
+imagePullSecrets: []
 kubernetesClusterDomain: cluster.local
 metricsService:
   ports:
