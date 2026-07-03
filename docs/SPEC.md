@@ -512,6 +512,21 @@ onChange():
          tracking, or the guest agent that owned the PID restarted and no
          longer recognizes it) → clear execPID, set phase=Pending,
          requeue(3s) so the next reconcile re-dispatches a fresh exec
+       → any other GetExecStatus error (not recognized as lost — e.g. the
+         KubeVirt/Proxmox "unknown pid after guest agent restart" case that
+         cannot yet be classified as lost, or a genuinely transient network
+         error), within the apply timeout → return the error (controller
+         requeues with backoff), execPID untouched
+       → any other GetExecStatus error, past the apply timeout → same
+         ApplyTimeout handling as "still running, past the apply timeout"
+         above: clear execPID, set phase=Failed, condition Applied=False
+         (reason=ApplyTimeout), return nil (no retry). This is what actually
+         bounds the KubeVirt/Proxmox post-reboot "unknown pid" case today:
+         since it cannot be classified as lost, it would otherwise return an
+         error forever and — because execPID > 0 short-circuits the
+         generation check in step 6 before it ever runs — deadlock the
+         config exactly like the "exec result lost" case, immune even to a
+         spec update.
        → exitCode == 0 → clear execPID, set phase=Applied, condition Applied=True
          (stamped with the generation this exec was dispatched for), return nil
        → exitCode != 0 → clear execPID, set phase=Failed, condition Applied=False
@@ -545,7 +560,7 @@ onDelete():
 - `generation > observedGeneration` → new spec available, dispatch exec
 - A target reboot newer than the last reboot this config has already attempted forces exactly one re-apply for the current generation, regardless of `observedGeneration`
 - Failed phase has no auto-retry; the config only re-dispatches when the user updates spec (new generation) or the target reboots again. A reboot-forced apply that fails does **not** get re-dispatched again for the same reboot — this closes the hot-loop that a permanently-failing render (e.g. a bad `set` command) combined with a stale reboot timestamp used to cause.
-- A dispatched apply that never exits is bounded by a fixed apply timeout; once exceeded, the config is marked Failed instead of being polled forever. There is currently no CRD field to tune this timeout per config.
+- A dispatched apply that never exits is bounded by a fixed apply timeout; once exceeded, the config is marked Failed instead of being polled forever. There is currently no CRD field to tune this timeout per config. The timeout bounds both "GetExecStatus keeps succeeding but reports still running" and "GetExecStatus keeps failing with a non-lost error" — a provider that cannot reliably tell a stale/unknown-pid error apart from a transient one (see KubeVirt/Proxmox GetExecStatus doc comments) would otherwise retry the error indefinitely without ever reaching Applied, Failed, or a fresh dispatch.
 - If the previously dispatched exec's result can no longer be retrieved, the controller does not treat this as a normal error to retry indefinitely — it clears the exec handle and re-dispatches a fresh `ExecScript` call, since retrying the same (now-meaningless) handle can never succeed.
 - `Applied` is set to `False` the moment a new generation (or a reboot-forced re-apply) is dispatched — not only on failure — so `kubectl wait --for=condition=Applied` cannot return early against a stale `True` left over from a previous generation while a new apply is in flight. The condition's `observedGeneration` reflects the generation the exec was actually dispatched for, not necessarily the object's current `.metadata.generation` (which may have moved on while the script was still running).
 

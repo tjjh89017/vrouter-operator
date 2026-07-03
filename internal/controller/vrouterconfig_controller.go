@@ -192,43 +192,57 @@ func (r *VRouterConfigReconciler) pollExecStatus(ctx context.Context, cfg *vrout
 	log := logf.FromContext(ctx)
 
 	status, err := prov.GetExecStatus(ctx, cfg.Status.ExecPID)
-	if err != nil {
-		if errors.Is(err, providertypes.ErrExecResultLost) {
-			// The previously dispatched exec handle is gone for good (operator
-			// restart lost its in-memory registry, or the guest agent that owned
-			// the PID restarted after a VM reboot). Retrying GetExecStatus with
-			// the same handle will never succeed, so give up on it and reset to
-			// Pending: the next reconcile's generation check in onChange will
-			// re-dispatch a fresh ExecScript call instead of looping forever.
-			log.Info("exec result lost, resetting to re-dispatch", "pid", cfg.Status.ExecPID, "reason", err.Error())
-			patch := client.MergeFrom(cfg.DeepCopy())
-			cfg.Status.ExecPID = 0
-			cfg.Status.ExecStartedTime = nil
-			cfg.Status.Phase = vrouterv1.PhasePending
-			cfg.Status.Message = "previous apply result was lost; re-applying"
-			if patchErr := r.Status().Patch(ctx, cfg, patch); patchErr != nil {
-				return ctrl.Result{}, patchErr
-			}
-			return ctrl.Result{RequeueAfter: requeueAfter}, nil
+	if err != nil && errors.Is(err, providertypes.ErrExecResultLost) {
+		// The previously dispatched exec handle is gone for good (operator
+		// restart lost its in-memory registry, or the guest agent that owned
+		// the PID restarted after a VM reboot). Retrying GetExecStatus with
+		// the same handle will never succeed, so give up on it and reset to
+		// Pending: the next reconcile's generation check in onChange will
+		// re-dispatch a fresh ExecScript call instead of looping forever.
+		log.Info("exec result lost, resetting to re-dispatch", "pid", cfg.Status.ExecPID, "reason", err.Error())
+		patch := client.MergeFrom(cfg.DeepCopy())
+		cfg.Status.ExecPID = 0
+		cfg.Status.ExecStartedTime = nil
+		cfg.Status.Phase = vrouterv1.PhasePending
+		cfg.Status.Message = "previous apply result was lost; re-applying"
+		if patchErr := r.Status().Patch(ctx, cfg, patch); patchErr != nil {
+			return ctrl.Result{}, patchErr
 		}
-		return ctrl.Result{}, fmt.Errorf("get exec status: %w", err)
+		return ctrl.Result{RequeueAfter: requeueAfter}, nil
 	}
 
-	if !status.Exited {
+	// Not yet a confirmed exit: either GetExecStatus itself failed (a
+	// transient error, e.g. a network blip, or — for providers that cannot
+	// reliably distinguish "unknown pid" from other failures, see the
+	// KubeVirt/Proxmox GetExecStatus doc comments — a guest agent that no
+	// longer recognizes the pid after a reboot) or it succeeded but reports
+	// the script as still running. Either way, this exec has not produced a
+	// result yet, so the same execApplyTimeout bound must apply: without
+	// this check here, a persistently erroring GetExecStatus would return
+	// early on every reconcile and never reach the timeout logic, leaving
+	// the config stuck in Applying forever (with ExecPID>0 also preventing
+	// the generation check from ever running) — the exact deadlock this
+	// timeout and the lost-result recovery above both exist to prevent.
+	if err != nil || !status.Exited {
 		if execStarted := cfg.Status.ExecStartedTime; execStarted != nil && time.Since(execStarted.Time) > execApplyTimeout {
 			// The script has been running longer than execApplyTimeout with no
-			// sign of exiting (e.g. a blocked commit lock or a hung command).
-			// Give up on this exec so it does not pin the config in Applying
-			// forever: fail the config, clear execPID/ExecStartedTime so a
-			// later generation change or reboot can dispatch a fresh attempt
+			// sign of exiting (e.g. a blocked commit lock or a hung command)
+			// or confirmed result (persistent GetExecStatus errors). Give up
+			// on this exec so it does not pin the config in Applying forever:
+			// fail the config, clear execPID/ExecStartedTime so a later
+			// generation change or reboot can dispatch a fresh attempt
 			// through the normal path, and do NOT requeue for retry (Failed
 			// has no auto-retry, same as any other apply failure).
-			log.Info("apply exec timed out, marking failed", "pid", cfg.Status.ExecPID, "startedAt", execStarted.Time, "timeout", execApplyTimeout)
+			msg := fmt.Sprintf("apply timed out after %s", execApplyTimeout)
+			if err != nil {
+				msg = fmt.Sprintf("apply timed out after %s (last error polling exec status: %s)", execApplyTimeout, err.Error())
+			}
+			log.Info("apply exec timed out, marking failed", "pid", cfg.Status.ExecPID, "startedAt", execStarted.Time, "timeout", execApplyTimeout, "lastPollErr", err)
 			patch := client.MergeFrom(cfg.DeepCopy())
 			cfg.Status.ExecPID = 0
 			cfg.Status.ExecStartedTime = nil
 			cfg.Status.Phase = vrouterv1.PhaseFailed
-			cfg.Status.Message = fmt.Sprintf("apply timed out after %s", execApplyTimeout)
+			cfg.Status.Message = msg
 			meta.SetStatusCondition(&cfg.Status.Conditions, metav1.Condition{
 				Type:               vrouterv1.ConditionApplied,
 				Status:             metav1.ConditionFalse,
@@ -237,6 +251,10 @@ func (r *VRouterConfigReconciler) pollExecStatus(ctx context.Context, cfg *vrout
 				ObservedGeneration: cfg.Status.ObservedGeneration,
 			})
 			return ctrl.Result{}, r.Status().Patch(ctx, cfg, patch)
+		}
+
+		if err != nil {
+			return ctrl.Result{}, fmt.Errorf("get exec status: %w", err)
 		}
 
 		patch := client.MergeFrom(cfg.DeepCopy())
