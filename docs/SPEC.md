@@ -27,11 +27,10 @@ VRouterTemplate + VRouterTarget + VRouterBinding
    → create/update VRouterConfig per router (ownerRef → Binding)
          │
    VRouterController
-   → dispatch to provider
-   → render internal script template (config + commands → script)
-   → write script to router via QGA
-   → execute script via QGA
-   → update VRouterConfig status
+   → dispatch to provider: ExecScript(config, commands, save)
+   → provider renders the internal script template, writes it to the
+     router, and executes it, all via QGA (see §7.4/§7.5)
+   → poll GetExecStatus, update VRouterConfig status
 ```
 
 ### 2.2 Provider Abstraction
@@ -40,17 +39,19 @@ Each provider instance is bound to a specific target router at construction time
 
 ```go
 type Provider interface {
-    // IsVMRunning checks whether the underlying VM is in a running state.
+    // IsVMRunning checks whether the underlying VM is in a running (non-stopped) state.
     IsVMRunning(ctx context.Context) (bool, error)
     // CheckReady verifies the router is reachable and ready to accept config
     // (QGA ping + vyos-router.service is-active).
     CheckReady(ctx context.Context) error
-    // WriteFile writes the apply script content to the router via guest agent.
-    WriteFile(ctx context.Context, content []byte) error
-    // ExecScript executes the apply script asynchronously, returns PID for tracking.
-    ExecScript(ctx context.Context) (pid int64, err error)
-    // GetExecStatus polls the result of a previously started script.
-    GetExecStatus(ctx context.Context, pid int64) (*ExecStatus, error)
+    // ExecScript renders and applies the given VyOS config asynchronously.
+    // config is a VyOS config block, commands is a block of configure-mode
+    // commands, save controls whether the running config is persisted to
+    // disk after commit. Returns a provider-specific handle (e.g. PID) for
+    // polling via GetExecStatus.
+    ExecScript(ctx context.Context, config, commands string, save bool) (handle int64, err error)
+    // GetExecStatus polls the result of a previously started ExecScript call.
+    GetExecStatus(ctx context.Context, handle int64) (*ExecStatus, error)
 }
 
 type ExecStatus struct {
@@ -61,7 +62,7 @@ type ExecStatus struct {
 }
 ```
 
-The script destination path (`/tmp/vrouter-apply.sh`) and execution command (`/bin/vbash`) are fixed inside the provider. The controller only provides the script content.
+There is no separate `WriteFile` step on the interface: each provider's `ExecScript` renders the internal script (§7.4) from the raw `config`/`commands`/`save` it is given, then writes and executes it via QGA (KubeVirt, Proxmox) or hands the raw config to the remote agent to render and run (vrouter-daemon, §9.8) — script rendering is a provider-internal concern, not something the controller does upfront. The script destination path (`/tmp/vrouter-apply.sh`) and execution command (`/bin/vbash`) are fixed inside the KubeVirt/Proxmox providers.
 
 ### 2.3 KubeVirt Provider (Default)
 
@@ -354,6 +355,8 @@ func renderTemplate(templateStr string, data map[string]interface{}) (string, er
 }
 ```
 
+**Function denylist**: templates render inside the operator process, so the full sprig function map is not exposed as-is. `env`, `expandenv`, and `getHostByName` are removed before parsing — an unrestricted template could otherwise read the operator pod's environment (potentially including injected secrets/tokens) via `{{ env "X" }}`/`{{ expandenv "$X" }}`, or trigger arbitrary DNS lookups via `getHostByName`. All other sprig helpers (`default`, `required`, `has`, `toYaml`, `range`, etc.) are unaffected. This filtered function map is the single source of truth for both controller-side rendering and the VRouterTemplate validating webhook's admission-time syntax check (§6.2), so a template calling a denied function is rejected at admission with "function ... not defined" instead of only failing later at reconcile.
+
 ### 5.2 Common sprig Functions
 
 | Function | Purpose | Example |
@@ -378,7 +381,7 @@ Performs cross-field validation and reference checks that kubebuilder JSON schem
 
 | Resource | Validation |
 |----------|------------|
-| VRouterTarget | `provider.kubevirt` must be set when `type=kubevirt`; `provider.proxmox` must be set when `type=proxmox`; `provider.daemon` (with non-empty `address` and `agentID`) must be set when `type=vrouter-daemon`; for Proxmox, `clusterRef.name` is mandatory and `clusterRef.namespace`, if set, must equal the VRouterTarget's own namespace (cross-namespace references are rejected) |
+| VRouterTarget | `provider.kubevirt` must be set when `type=kubevirt`; `provider.proxmox` must be set when `type=proxmox`; `provider.daemon` (with non-empty `address` and `agentID`) must be set when `type=vrouter-daemon`; for Proxmox, `clusterRef.name` is mandatory and `clusterRef.namespace`, if set, must equal the VRouterTarget's own namespace (cross-namespace references are rejected). On **delete**, rejected if any VRouterBinding's `targetRefs` or any VRouterConfig's `targetRef` in the same namespace still resolves to this VRouterTarget (error names one referencing object and, if more exist, how many others) — this is the only CRD in §6.2 whose webhook registers the `delete` verb |
 | VRouterConfig | `spec.targetRef` must resolve to an existing VRouterTarget; `spec.targetRef.namespace`, if set, must equal the VRouterConfig's own namespace (cross-namespace references are rejected). VRouterConfig does **not** carry its own `provider` block, so there is no provider cross-field validation here — only the targetRef checks above. |
 | VRouterBinding | `spec.targetRefs` must not be empty; at least one of `spec.templateRef` (deprecated) or `spec.templateRefs` must be set; every entry in `spec.templateRef`, `spec.templateRefs[]`, and `spec.targetRefs[]` must resolve to an existing object, and each entry's `namespace`, if set, must equal the VRouterBinding's own namespace (cross-namespace references are rejected) |
 | VRouterTemplate | `spec.config` and `spec.commands`, when set, must each parse as valid Go `text/template` syntax (parsed with the same sprig FuncMap used at render time — see §5.1); a syntax error is rejected at admission instead of surfacing later as a render failure |
@@ -485,7 +488,7 @@ for _, cfg := range existing.Items {
 |------|-------------|
 | Watch | VRouterConfig |
 | Dependency | Provider-specific (KubeVirt: VMI + virt-launcher pod; Proxmox: API endpoint) |
-| Apply | Pre-check → render script → write file → execute → poll |
+| Apply | Pre-check → dispatch `ExecScript(config, commands, save)` (provider renders/writes/executes internally) → poll |
 | Status | `phase` is display-only; `observedGeneration` + `execPID` drive control flow |
 
 **Reconcile flow:**
@@ -501,7 +504,13 @@ onChange():
   2. IsVMRunning()
      → false → skip (VM stopped, no action)
   3. CheckReady()
-     → fail → return error (controller requeues with backoff)
+     → fail → if phase was Applied: reset phase=Pending and set condition
+       Applied=False (reason=RouterNotReady, message includes the CheckReady
+       error) in the same status patch, since a previously-Applied result can
+       no longer be trusted once the router stops answering ready checks
+       (commonly a mid-reboot window). If phase was not Applied, status is
+       left untouched (nothing to invalidate). Either way, requeue(10s); this
+       is not treated as a reconcile error.
 
   4. if execPID > 0:
        GetExecStatus(execPID)
@@ -544,9 +553,10 @@ onChange():
   7. (new spec, or a reboot not yet handled)
      set condition Applied=False (reason=Applying) for the generation about
      to be dispatched, before the script starts running
-     render internal script template
-     WriteFile(script)
-     pid = ExecScript()
+     pid = ExecScript(cfg.Spec.Config, cfg.Spec.Commands, save)
+       — the provider renders the internal script template (§7.4) from these
+       raw values and writes + executes it via QGA; the controller does not
+       render or write the script itself
      record dispatch time; set execPID=pid, observedGeneration=generation,
      "last reboot handled" = target.status.lastRebootTime, phase=Applying
      return requeue(3s)
@@ -563,12 +573,13 @@ onDelete():
 - A dispatched apply that never exits is bounded by a fixed apply timeout; once exceeded, the config is marked Failed instead of being polled forever. There is currently no CRD field to tune this timeout per config. The timeout bounds both "GetExecStatus keeps succeeding but reports still running" and "GetExecStatus keeps failing with a non-lost error" — a provider that cannot reliably tell a stale/unknown-pid error apart from a transient one (see KubeVirt/Proxmox GetExecStatus doc comments) would otherwise retry the error indefinitely without ever reaching Applied, Failed, or a fresh dispatch.
 - If the previously dispatched exec's result can no longer be retrieved, the controller does not treat this as a normal error to retry indefinitely — it clears the exec handle and re-dispatches a fresh `ExecScript` call, since retrying the same (now-meaningless) handle can never succeed.
 - `Applied` is set to `False` the moment a new generation (or a reboot-forced re-apply) is dispatched — not only on failure — so `kubectl wait --for=condition=Applied` cannot return early against a stale `True` left over from a previous generation while a new apply is in flight. The condition's `observedGeneration` reflects the generation the exec was actually dispatched for, not necessarily the object's current `.metadata.generation` (which may have moved on while the script was still running).
+- `Applied` is also flipped to `False` (reason=`RouterNotReady`) the moment step 3's `CheckReady` fails on a config that was previously `Applied` — otherwise a stale `True` would let `kubectl wait --for=condition=Applied` report success for the entire window the router is unreachable, even though the controller no longer trusts that result. If the config was not previously `Applied` (already `Pending`/`Applying`/`Failed`), a `CheckReady` failure leaves status untouched — there is no stale `True` to clear.
 
 **Condition (for `kubectl wait`):**
 
 | Condition type | Status=True | Status=False |
 |----------------|-------------|--------------|
-| `Applied` | phase=Applied (for the generation the exec was dispatched for) | phase=Failed (including apply-timeout), or an apply for a new generation/reboot has just been dispatched (phase=Applying) |
+| `Applied` | phase=Applied (for the generation the exec was dispatched for) | phase=Failed (including apply-timeout), an apply for a new generation/reboot has just been dispatched (phase=Applying), or CheckReady failed on a config that was previously Applied (phase resets to Pending, reason=RouterNotReady) |
 
 ```bash
 kubectl wait --for=condition=Applied vrouterconfig/myconfig --timeout=60s
@@ -621,25 +632,28 @@ kubectl wait --for=condition=Applied vrouterconfig/myconfig --timeout=60s
 
 ### 7.4 Internal Script Template
 
-The controller maintains a hardcoded script template. The `config` and `commands` fields from VRouterConfig are injected into this template to produce a complete vbash script, which is then written to the router and executed.
+The `internal/provider/qga` package (shared by the KubeVirt and Proxmox providers) maintains a hardcoded script template. The `config` and `commands` fields from VRouterConfig are passed straight through the provider's `ExecScript(config, commands, save)` and injected into this template to produce a complete vbash script, which is then written to the router and executed. This rendering happens inside the provider, not the controller — see §2.2.
 
 ```bash
 #!/bin/vbash
+if [ "$(id -g -n)" != 'vyattacfg' ] ; then
+    exec sg vyattacfg -c "/bin/vbash $(readlink -f $0) $@"
+fi
 source /opt/vyatta/etc/functions/script-template
 configure
 
 # --- config section ---
 {{- if .Config }}
-load /dev/stdin <<'VYOS_CONFIG_EOF'
+load /dev/stdin <<'{{ .Delimiter }}'
 {{ .Config }}
-VYOS_CONFIG_EOF
+{{ .Delimiter }}
 {{- else }}
 load /opt/vyatta/etc/config.boot.default
 {{- end }}
 
 # --- commands section (optional) ---
-{{- range .Commands }}
-{{ . }}
+{{- if .Commands }}
+{{ .Commands }}
 {{- end }}
 
 commit
@@ -648,14 +662,16 @@ save
 {{- end }}
 ```
 
-- `config`: loaded via `load /dev/stdin` as a config.boot fragment
-- `commands`: individual `set` commands executed in configure mode
+- The leading `sg vyattacfg` re-exec guard ensures the script runs in the group required to use the `configure`/`commit` config-mode commands even when the QGA `guest-exec` session that launched it does not already carry that group membership.
+- `config`: loaded via `load /dev/stdin` as a config.boot fragment, terminated by a heredoc delimiter (`.Delimiter`)
+- **Heredoc delimiter randomization**: `.Delimiter` is not a fixed string. `config` is built from lower-privileged user `params`, so a fixed delimiter (e.g. a literal `VYOS_CONFIG_EOF`) would let a config line equal to that marker close the heredoc early and run the remainder of the file as arbitrary shell, as root, inside the router VM. Each render generates an unpredictable random token (`VROUTER_CONFIG_EOF_<hex>`, `crypto/rand`-backed) and checks it against every line of `config`, growing the random suffix and retrying (up to a bounded number of attempts) on the astronomically unlikely chance of a collision. Rendering fails outright if a collision-free delimiter cannot be produced within that bound, rather than falling back to an unsafe fixed marker.
+- `commands`: a single pre-joined block of `set` commands (already newline-joined by BindingController from one or more templates, or supplied directly on a hand-authored VRouterConfig) executed in configure mode — not a list iterated by the script template itself
 - `commit` is always appended; `save` is conditional (default: true), controlled by `spec.save`
 - The script is written to a fixed path `/tmp/vrouter-apply.sh` (overwritten each time) then executed
 
 ### 7.5 QGA Script Execution Flow
 
-All providers follow the same two-step pattern: write file → execute file.
+KubeVirt and Proxmox both implement `ExecScript` as the same two-step pattern internally — render the script (§7.4), write it, then execute it — rather than exposing write and execute as separate interface calls; the caller only ever calls `ExecScript(config, commands, save)` followed by polling `GetExecStatus`.
 
 **KubeVirt** (SPDY exec into virt-launcher pod):
 
@@ -718,7 +734,13 @@ rules:
   resources: ["vrouterconfigs/status", "vrouterbindings/status",
               "proxmoxclusters/status", "vroutertargets/status"]
   verbs: ["get", "update", "patch"]
+- apiGroups: ["vrouter.kojuro.date"]
+  resources: ["vrouterconfigs/finalizers", "vrouterbindings/finalizers",
+              "proxmoxclusters/finalizers"]
+  verbs: ["update"]
 ```
+
+The `/finalizers` update rule is only needed for the three CRDs whose controllers add/remove a finalizer (VRouterConfig, VRouterBinding, ProxmoxCluster — see §7). VRouterTarget and VRouterTemplate have no finalizer logic (nothing owns cascade-deletable children through them), so they carry no `/finalizers` rule.
 
 ---
 
@@ -775,6 +797,12 @@ type VRouterTargetStatus struct {
     // is within 1.5× syncInterval (recently rebooted).
     // +optional
     LastRebootTime *metav1.Time `json:"lastRebootTime,omitempty"`
+    // VMRunning reflects whether the target VM was observed as running during
+    // the most recent poll by VRouterTargetController (§7; polls every 60s
+    // via the provider's IsVMRunning, for any provider type), and is exposed
+    // as a printer column.
+    // +optional
+    VMRunning bool `json:"vmRunning,omitempty"`
 }
 ```
 
@@ -1078,10 +1106,8 @@ Controller                    render per router
                               └── spec.commands   (rendered set commands)
                                          │
                                   VRouterController
-                                  render internal script template
-                                  (config + commands → vbash script)
-                                         │
-                                  write file → exec script
+                                  dispatch ExecScript(config, commands, save)
+                                  (provider renders script, writes + execs it)
                                          │
                               ┌──────────┴──────────┐
                               ▼                     ▼
