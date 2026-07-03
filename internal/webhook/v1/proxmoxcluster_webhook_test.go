@@ -17,11 +17,14 @@ limitations under the License.
 package v1
 
 import (
+	"time"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
 	vrouterv1 "github.com/tjjh89017/vrouter-operator/api/v1"
-	// TODO (user): Add any additional imports if needed
 )
 
 var _ = Describe("ProxmoxCluster Webhook", func() {
@@ -32,56 +35,112 @@ var _ = Describe("ProxmoxCluster Webhook", func() {
 		defaulter ProxmoxClusterCustomDefaulter
 	)
 
+	// validSpec returns a ProxmoxClusterSpec that satisfies every field the
+	// validating webhook checks.
+	validSpec := func() vrouterv1.ProxmoxClusterSpec {
+		return vrouterv1.ProxmoxClusterSpec{
+			Endpoints: []string{"https://pve.example.com:8006"},
+			CredentialsRef: vrouterv1.SecretReference{
+				Name: "pve-credentials",
+			},
+			SyncInterval: metav1.Duration{Duration: 60 * time.Second},
+		}
+	}
+
 	BeforeEach(func() {
-		obj = &vrouterv1.ProxmoxCluster{}
-		oldObj = &vrouterv1.ProxmoxCluster{}
+		obj = &vrouterv1.ProxmoxCluster{Spec: validSpec()}
+		oldObj = &vrouterv1.ProxmoxCluster{Spec: validSpec()}
 		validator = ProxmoxClusterCustomValidator{}
 		Expect(validator).NotTo(BeNil(), "Expected validator to be initialized")
 		defaulter = ProxmoxClusterCustomDefaulter{}
 		Expect(defaulter).NotTo(BeNil(), "Expected defaulter to be initialized")
 		Expect(oldObj).NotTo(BeNil(), "Expected oldObj to be initialized")
 		Expect(obj).NotTo(BeNil(), "Expected obj to be initialized")
-		// TODO (user): Add any setup logic common to all tests
-	})
-
-	AfterEach(func() {
-		// TODO (user): Add any teardown logic common to all tests
-	})
-
-	Context("When creating ProxmoxCluster under Defaulting Webhook", func() {
-		// TODO (user): Add logic for defaulting webhooks
-		// Example:
-		// It("Should apply defaults when a required field is empty", func() {
-		//     By("simulating a scenario where defaults should be applied")
-		//     obj.SomeFieldWithDefault = ""
-		//     By("calling the Default method to apply defaults")
-		//     defaulter.Default(ctx, obj)
-		//     By("checking that the default values are set")
-		//     Expect(obj.SomeFieldWithDefault).To(Equal("default_value"))
-		// })
 	})
 
 	Context("When creating or updating ProxmoxCluster under Validating Webhook", func() {
-		// TODO (user): Add logic for validating webhooks
-		// Example:
-		// It("Should deny creation if a required field is missing", func() {
-		//     By("simulating an invalid creation scenario")
-		//     obj.SomeRequiredField = ""
-		//     Expect(validator.ValidateCreate(ctx, obj)).Error().To(HaveOccurred())
-		// })
-		//
-		// It("Should admit creation if all required fields are present", func() {
-		//     By("simulating an invalid creation scenario")
-		//     obj.SomeRequiredField = "valid_value"
-		//     Expect(validator.ValidateCreate(ctx, obj)).To(BeNil())
-		// })
-		//
-		// It("Should validate updates correctly", func() {
-		//     By("simulating a valid update scenario")
-		//     oldObj.SomeRequiredField = "updated_value"
-		//     obj.SomeRequiredField = "updated_value"
-		//     Expect(validator.ValidateUpdate(ctx, oldObj, obj)).To(BeNil())
-		// })
-	})
+		It("Should admit a fully valid spec on create", func() {
+			_, err := validator.ValidateCreate(ctx, obj)
+			Expect(err).NotTo(HaveOccurred())
+		})
 
+		It("Should admit a fully valid spec on update", func() {
+			_, err := validator.ValidateUpdate(ctx, oldObj, obj)
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		It("Should deny creation when spec.endpoints is empty", func() {
+			obj.Spec.Endpoints = []string{}
+			_, err := validator.ValidateCreate(ctx, obj)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("spec.endpoints"))
+		})
+
+		It("Should deny update when spec.endpoints is empty", func() {
+			obj.Spec.Endpoints = []string{}
+			_, err := validator.ValidateUpdate(ctx, oldObj, obj)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("spec.endpoints"))
+		})
+
+		It("Should deny creation when an endpoint entry is blank", func() {
+			obj.Spec.Endpoints = []string{""}
+			_, err := validator.ValidateCreate(ctx, obj)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("spec.endpoints[0]"))
+		})
+
+		It("Should deny creation when spec.syncInterval is zero", func() {
+			obj.Spec.SyncInterval = metav1.Duration{}
+			_, err := validator.ValidateCreate(ctx, obj)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("spec.syncInterval"))
+		})
+
+		It("Should deny creation when spec.syncInterval is negative", func() {
+			obj.Spec.SyncInterval = metav1.Duration{Duration: -60 * time.Second}
+			_, err := validator.ValidateCreate(ctx, obj)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("spec.syncInterval"))
+		})
+
+		It("Should deny update when spec.syncInterval is negative", func() {
+			obj.Spec.SyncInterval = metav1.Duration{Duration: -60 * time.Second}
+			_, err := validator.ValidateUpdate(ctx, oldObj, obj)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("spec.syncInterval"))
+		})
+
+		It("Should admit a positive spec.syncInterval", func() {
+			obj.Spec.SyncInterval = metav1.Duration{Duration: 30 * time.Second}
+			_, err := validator.ValidateCreate(ctx, obj)
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		It("Should deny creation when spec.credentialsRef.name is empty", func() {
+			obj.Spec.CredentialsRef.Name = ""
+			_, err := validator.ValidateCreate(ctx, obj)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("spec.credentialsRef.name"))
+		})
+
+		It("Should deny update when spec.credentialsRef.name is empty", func() {
+			obj.Spec.CredentialsRef.Name = ""
+			_, err := validator.ValidateUpdate(ctx, oldObj, obj)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("spec.credentialsRef.name"))
+		})
+
+		It("Should skip validation on update when the object is being deleted", func() {
+			now := metav1.Now()
+			obj.DeletionTimestamp = &now
+			obj.Finalizers = []string{"example.com/finalizer"}
+			obj.Spec.Endpoints = []string{}
+			obj.Spec.SyncInterval = metav1.Duration{Duration: -60 * time.Second}
+			obj.Spec.CredentialsRef.Name = ""
+
+			_, err := validator.ValidateUpdate(ctx, oldObj, obj)
+			Expect(err).NotTo(HaveOccurred())
+		})
+	})
 })
