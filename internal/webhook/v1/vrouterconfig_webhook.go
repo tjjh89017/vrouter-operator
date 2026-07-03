@@ -115,6 +115,10 @@ func (v *VRouterConfigCustomValidator) ValidateUpdate(ctx context.Context, oldOb
 }
 
 func validateVRouterConfig(ctx context.Context, cl client.Client, cfg *vrouterv1.VRouterConfig) error {
+	ns := vrouterv1.ResolveNamespace(cfg.Spec.TargetRef, cfg.Namespace)
+	if ns != cfg.Namespace {
+		return fmt.Errorf("cross-namespace reference not allowed: spec.targetRef may only reference the same namespace")
+	}
 	var target vrouterv1.VRouterTarget
 	if err := cl.Get(ctx, types.NamespacedName{Namespace: cfg.Namespace, Name: cfg.Spec.TargetRef.Name}, &target); err != nil {
 		if apierrors.IsNotFound(err) {

@@ -92,7 +92,7 @@ func (v *VRouterTargetCustomValidator) ValidateCreate(_ context.Context, obj run
 	}
 	vroutertargetlog.Info("Validation for VRouterTarget upon creation", "name", vroutertarget.GetName())
 
-	return nil, validateProviderConfig(vroutertarget.Spec.Provider)
+	return nil, validateProviderConfig(vroutertarget.Spec.Provider, vroutertarget.Namespace)
 }
 
 // ValidateUpdate implements webhook.CustomValidator so a webhook will be registered for the type VRouterTarget.
@@ -103,7 +103,14 @@ func (v *VRouterTargetCustomValidator) ValidateUpdate(_ context.Context, oldObj,
 	}
 	vroutertargetlog.Info("Validation for VRouterTarget upon update", "name", vroutertarget.GetName())
 
-	return nil, validateProviderConfig(vroutertarget.Spec.Provider)
+	// Skip validation while the object is being deleted, consistent with the
+	// deletion-path skip used by the binding and config webhooks: a resource that
+	// was valid when created (e.g. before this check existed) must not be blocked
+	// from having its finalizer removed.
+	if !vroutertarget.GetDeletionTimestamp().IsZero() {
+		return nil, nil
+	}
+	return nil, validateProviderConfig(vroutertarget.Spec.Provider, vroutertarget.Namespace)
 }
 
 // ValidateDelete implements webhook.CustomValidator so a webhook will be registered for the type VRouterTarget.
