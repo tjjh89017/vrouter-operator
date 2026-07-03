@@ -22,6 +22,12 @@ linters:
     - unparam
     - unused
   settings:
+    goconst:
+      # Test fixtures legitimately repeat literal names/strings; extracting
+      # them into constants would only add ceremony without improving
+      # readability. Counting is package-wide so this can't be done via
+      # linters.exclusions.rules (see golangci-lint's own goconst docs).
+      ignore-tests: true
     revive:
       rules:
         - name: comment-spacings
