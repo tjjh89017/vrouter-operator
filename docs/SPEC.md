@@ -41,8 +41,13 @@ Each provider instance is bound to a specific target router at construction time
 type Provider interface {
     // IsVMRunning checks whether the underlying VM is in a running (non-stopped) state.
     IsVMRunning(ctx context.Context) (bool, error)
-    // CheckReady verifies the router is reachable and ready to accept config
-    // (QGA ping + vyos-router.service is-active).
+    // CheckReady verifies the router is reachable and ready to accept config.
+    // KubeVirt/Proxmox: QGA responds to ping, then polls
+    // `systemctl show -p SubState vyos-router.service` until it exits and
+    // reports substate "exited" — vyos-router is a oneshot unit that runs to
+    // completion, so readiness is "has finished", not "is-active/running".
+    // vrouter-daemon: no-op (a successful IsVMRunning already implies the
+    // agent connection is up and ready).
     CheckReady(ctx context.Context) error
     // ExecScript renders and applies the given VyOS config asynchronously.
     // config is a VyOS config block, commands is a block of configure-mode
@@ -717,6 +722,46 @@ POST /api2/json/nodes/{node}/qemu/{vmid}/agent/exec
 GET /api2/json/nodes/{node}/qemu/{vmid}/agent/exec-status?pid={pid}
 ```
 
+### 7.6 VRouterTargetController
+
+| Item | Description |
+|------|-------------|
+| Watch | VRouterTarget (primary); VirtualMachineInstance (KubeVirt only, mapped by name+namespace) |
+| Output | Updates `VRouterTarget.status.vmRunning` |
+| Requeue | `RequeueAfter(60s)` on every path (poll interval), regardless of outcome |
+| Finalizer | None — this controller only reports status on an object other controllers reference; it does not own external resources to clean up |
+
+**Reconcile flow (onChange only; there is no delete-time branch):**
+
+```
+1. Get VRouterTarget; NotFound → return (nothing to do)
+
+2. Build provider via provider.New(ctx, target, client, restConfig) (§2.2)
+   → error (e.g. referenced Secret/ProxmoxCluster not yet available) →
+     log + requeue(60s); status.vmRunning is left at its last value
+
+3. running, err := prov.IsVMRunning(ctx)
+   → error → log + requeue(60s); status.vmRunning is left at its last value
+   → success → each provider treats "VM not found" as a clean stopped
+     result rather than an error: KubeVirt reports false when the
+     VirtualMachineInstance is missing, and Proxmox reports false when the
+     VMID is absent from the cluster (VM destroyed) or the node returns 404
+
+4. if running != status.vmRunning:
+     patch status.vmRunning = running (client.MergeFrom on a deep copy)
+     — VRouterConfigController watches VRouterTarget via configsForTarget,
+       so this status patch alone re-triggers reconciles of every
+       VRouterConfig referencing this target; no explicit enqueue needed
+
+5. return requeue(60s)
+```
+
+**VMI watch mapping** (`vmiToVRouterTargets`, KubeVirt only): on any VirtualMachineInstance event, lists all VRouterTargets and enqueues the ones whose `spec.provider.kubevirt.name` and resolved namespace (defaulting to the target's own namespace, the same rule the provider factory applies, §2.2) match the VMI's name and namespace. This makes a VM start/stop transition visible immediately instead of waiting up to 60s for the next poll. Proxmox targets have no equivalent watch and rely solely on the 60s interval here; `status.proxmoxNode` and reboot detection for Proxmox are instead driven by ProxmoxClusterController's own poll (§7.3).
+
+**Error handling and staleness**: a persistent `IsVMRunning` error (as distinct from a clean "not found") leaves `status.vmRunning` at its last observed value with no signal that the value may now be stale — there is no `lastProbeTime`/`Unknown` state today. `status.vmRunning` is display-only (a printer column, §9.2); no controller gates behavior on it, so this is a documented gap rather than a live bug. See the "VRouterTarget Health Probe" item in `docs/TODO.md` for the proposed fix and why it has not been implemented yet.
+
+**Relationship to the provider factory**: `provider.New` (§2.2) is called fresh on every reconcile rather than caching a provider instance across reconciles, so a change to `target.spec.provider` or the underlying Secret/ProxmoxCluster takes effect on the very next poll with no separate rebuild step.
+
 ---
 
 ## 8. RBAC Requirements
@@ -807,7 +852,7 @@ type VRouterTargetStatus struct {
     // +optional
     LastRebootTime *metav1.Time `json:"lastRebootTime,omitempty"`
     // VMRunning reflects whether the target VM was observed as running during
-    // the most recent poll by VRouterTargetController (§7; polls every 60s
+    // the most recent poll by VRouterTargetController (§7.6; polls every 60s
     // via the provider's IsVMRunning, for any provider type), and is exposed
     // as a printer column.
     // +optional
