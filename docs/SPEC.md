@@ -596,10 +596,17 @@ kubectl wait --for=condition=Applied vrouterconfig/myconfig --timeout=60s
 4. List all VRouterTargets referencing this ProxmoxCluster (clusterRef.name == cluster.Name)
    For each target:
      a. Update status.proxmoxNode = map[vmid].node (or "" if not found)
-     b. Detect reboot from Proxmox uptime: if uptime ≤ 1.5 × syncInterval → set lastRebootTime = now
+     b. Detect reboot from Proxmox uptime: if 0 < uptime ≤ 1.5 × syncInterval →
+        derive bootTime = (time uptime was observed) - uptime, and set
+        lastRebootTime = bootTime only if that is more than a small tolerance
+        (5s, absorbs uptime rounding and measurement skew) newer than the
+        currently stored lastRebootTime
      c. If checkGuestUptime enabled:
           Async exec `cat /proc/uptime` via QGA, poll with 10s timeout
-          If guest uptime ≤ 1.5 × syncInterval → set lastRebootTime = now
+          If 0 < guest uptime ≤ 1.5 × syncInterval → derive bootTime and update
+          lastRebootTime using the same rule as 4b (using the time the guest
+          uptime value was actually read back, not the time the sync started,
+          since the QGA poll can itself take up to the full 10s timeout)
      d. Patch VRouterTarget.status
 
 5. Set status.lastSyncTime = now, update Synced condition
@@ -608,7 +615,7 @@ kubectl wait --for=condition=Applied vrouterconfig/myconfig --timeout=60s
 
 **Purpose of `proxmoxNode` and `lastRebootTime`:**
 - `proxmoxNode`: The provider factory reads this to build the Proxmox provider with the correct node name, since Proxmox QGA commands are node-scoped. Step 4a clears it to `""` (rather than leaving the previous value) when the VMID is absent from `/cluster/resources` — e.g. the VM was destroyed. Leaving a stale node cached here would otherwise let the provider factory's cached-node fallback target the wrong host if the same VMID is later reused on a different node.
-- `lastRebootTime`: VRouterController (§7.2) compares this against the last reboot it has already dispatched a forced re-apply for, to force re-apply after a reboot at most once per reboot.
+- `lastRebootTime`: VRouterController (§7.2) compares this against the last reboot it has already dispatched a forced re-apply for, to force re-apply after a reboot at most once per reboot. Deriving it as `bootTime = observedAt - uptime` (rather than stamping the sync's wall-clock time directly) and only advancing it when the new bootTime is meaningfully newer than the stored one means repeated syncs during the same reboot's low-uptime window settle on one stable value instead of continuously advancing lastRebootTime — which would otherwise make VRouterController force a redundant re-apply on every sync until uptime crossed the threshold.
 
 ---
 
