@@ -144,6 +144,9 @@ func validateBinding(ctx context.Context, cl client.Client, binding *vrouterv1.V
 		var tmpl vrouterv1.VRouterTemplate
 		ref := *binding.Spec.TemplateRef //nolint:staticcheck // backward compat
 		ns := vrouterv1.ResolveNamespace(ref, binding.Namespace)
+		if ns != binding.Namespace {
+			return fmt.Errorf("cross-namespace reference not allowed: spec.templateRef may only reference the same namespace")
+		}
 		if err := cl.Get(ctx, types.NamespacedName{Namespace: ns, Name: ref.Name}, &tmpl); err != nil {
 			if apierrors.IsNotFound(err) {
 				return fmt.Errorf("spec.templateRef %q (namespace %q) not found", ref.Name, ns)
@@ -156,6 +159,9 @@ func validateBinding(ctx context.Context, cl client.Client, binding *vrouterv1.V
 	for i, ref := range binding.Spec.TemplateRefs {
 		var tmpl vrouterv1.VRouterTemplate
 		ns := vrouterv1.ResolveNamespace(ref, binding.Namespace)
+		if ns != binding.Namespace {
+			return fmt.Errorf("cross-namespace reference not allowed: spec.templateRefs[%d] may only reference the same namespace", i)
+		}
 		if err := cl.Get(ctx, types.NamespacedName{Namespace: ns, Name: ref.Name}, &tmpl); err != nil {
 			if apierrors.IsNotFound(err) {
 				return fmt.Errorf("spec.templateRefs[%d] %q (namespace %q) not found", i, ref.Name, ns)
@@ -165,9 +171,12 @@ func validateBinding(ctx context.Context, cl client.Client, binding *vrouterv1.V
 	}
 
 	// Verify each targetRef exists.
-	for _, ref := range binding.Spec.TargetRefs {
+	for i, ref := range binding.Spec.TargetRefs {
 		var target vrouterv1.VRouterTarget
 		ns := vrouterv1.ResolveNamespace(ref, binding.Namespace)
+		if ns != binding.Namespace {
+			return fmt.Errorf("cross-namespace reference not allowed: spec.targetRefs[%d] may only reference the same namespace", i)
+		}
 		if err := cl.Get(ctx, types.NamespacedName{Namespace: ns, Name: ref.Name}, &target); err != nil {
 			if apierrors.IsNotFound(err) {
 				return fmt.Errorf("spec.targetRefs %q (namespace %q) not found", ref.Name, ns)

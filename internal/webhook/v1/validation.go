@@ -24,7 +24,9 @@ import (
 
 // validateProviderConfig checks that the provider-specific sub-config is present
 // for the declared provider type. Field-level validation is handled by kubebuilder markers.
-func validateProviderConfig(provider vrouterv1.ProviderConfig) error {
+// namespace is the namespace of the object that owns this provider config (e.g. the
+// VRouterTarget), used to reject cross-namespace references.
+func validateProviderConfig(provider vrouterv1.ProviderConfig, namespace string) error {
 	switch provider.Type {
 	case vrouterv1.ProviderKubeVirt, "":
 		if provider.KubeVirt == nil {
@@ -36,6 +38,9 @@ func validateProviderConfig(provider vrouterv1.ProviderConfig) error {
 		}
 		if provider.Proxmox.ClusterRef.Name == "" {
 			return fmt.Errorf("provider.proxmox.clusterRef.name must be set")
+		}
+		if ns := vrouterv1.ResolveNamespace(provider.Proxmox.ClusterRef, namespace); ns != namespace {
+			return fmt.Errorf("cross-namespace reference not allowed: provider.proxmox.clusterRef may only reference the same namespace")
 		}
 	case vrouterv1.ProviderVRouterDaemon:
 		if provider.Daemon == nil {
