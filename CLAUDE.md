@@ -37,6 +37,9 @@ make build-installer IMG=<image>
 # Release packaging — Helm chart (regenerate after CRD/manifest changes)
 # Requires: go install github.com/arttor/helmify/cmd/helmify@latest
 # Chart lives in charts/vrouter-operator/; run helm lint before committing
+# CAUTION: some templates carry manual fixes helmify does not generate
+# (Service-name trunc-63 guards, webhookServiceName helper, manager env list —
+# marked with NOTE comments); re-apply/verify them after regenerating
 bin/kustomize build config/default | helmify charts/vrouter-operator
 helm package charts/vrouter-operator  # → vrouter-operator-<version>.tgz
 ```
@@ -62,19 +65,19 @@ This is a **kubebuilder/operator-sdk** operator (Go module: `github.com/tjjh8901
 | Path | Purpose |
 |------|---------|
 | `api/v1/` | CRD type definitions (flat, no subfolders) |
-| `internal/controller/` | Reconcilers for all 4 CRDs |
-| `internal/webhook/v1/` | Defaulting + validating webhooks for all 4 CRDs |
-| `internal/provider/` | Provider interface (`types/`), factory (`provider.go`), KubeVirt impl (`kubevirt/`), Proxmox stub (`proxmox/`), shared QGA constants (`qga/`) |
+| `internal/controller/` | Reconcilers for all 5 CRDs |
+| `internal/webhook/v1/` | Defaulting + validating webhooks for all 5 CRDs |
+| `internal/provider/` | Provider interface (`types/`), factory (`provider.go`), KubeVirt impl (`kubevirt/`), Proxmox impl (`proxmox/`), vrouter-daemon gRPC impl (`daemon/`), shared QGA constants (`qga/`) |
 | `config/` | Kustomize manifests (CRDs, RBAC, webhook config) |
 | `cmd/main.go` | Manager entrypoint; registers all controllers and webhooks |
 
 ### API types
 
 Shared types live in `api/v1/shared_types.go` (ProviderConfig, SecretReference, etc.).
-Provider-specific types are in `api/v1/kubevirt_types.go` and `api/v1/proxmox_types.go`.
+Provider-specific types are in `api/v1/kubevirt_types.go`, `api/v1/proxmox_types.go` (plus `api/v1/proxmoxcluster_types.go`), and `api/v1/daemon_types.go`.
 Constants (finalizer name, label keys) are in `api/v1/constants.go`.
 
-Provider identification: KubeVirt uses `KubeVirtConfig.Name` (VM name), Proxmox uses `ProxmoxConfig.VMID` (integer). See `docs/SPEC.md §9.6–9.7`.
+Provider identification: KubeVirt uses `KubeVirtConfig.Name` (VM name), Proxmox uses `ProxmoxConfig.VMID` (integer), vrouter-daemon uses `DaemonConfig.Address`/`AgentID`. See `docs/SPEC.md §9.6–9.8`.
 
 ### Controllers
 
