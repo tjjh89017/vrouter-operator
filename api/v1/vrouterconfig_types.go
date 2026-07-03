@@ -44,6 +44,14 @@ type VRouterConfigStatus struct {
 	ExecPID int64 `json:"execPID,omitempty"`
 	// +optional
 	LastAppliedTime *metav1.Time `json:"lastAppliedTime,omitempty"`
+	// LastRebootHandledTime records the VRouterTarget.Status.LastRebootTime
+	// value that this VRouterConfig has already dispatched a reboot-forced
+	// apply for. It is stamped at dispatch time (whether the apply succeeds
+	// or fails) so a single reboot forces at most one re-apply attempt; a
+	// failing apply does not get re-dispatched forever. A newer
+	// LastRebootTime than this value still forces exactly one fresh re-apply.
+	// +optional
+	LastRebootHandledTime *metav1.Time `json:"lastRebootHandledTime,omitempty"`
 	// +optional
 	Message string `json:"message,omitempty"`
 	// ObservedGeneration is the generation for which exec was last dispatched.

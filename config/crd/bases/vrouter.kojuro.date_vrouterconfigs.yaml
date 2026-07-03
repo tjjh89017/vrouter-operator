@@ -144,6 +144,16 @@ spec:
               lastAppliedTime:
                 format: date-time
                 type: string
+              lastRebootHandledTime:
+                description: |-
+                  LastRebootHandledTime records the VRouterTarget.Status.LastRebootTime
+                  value that this VRouterConfig has already dispatched a reboot-forced
+                  apply for. It is stamped at dispatch time (whether the apply succeeds
+                  or fails) so a single reboot forces at most one re-apply attempt; a
+                  failing apply does not get re-dispatched forever. A newer
+                  LastRebootTime than this value still forces exactly one fresh re-apply.
+                format: date-time
+                type: string
               message:
                 type: string
               observedGeneration:
