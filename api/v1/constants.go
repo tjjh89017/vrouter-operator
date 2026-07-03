@@ -37,3 +37,15 @@ const ConditionApplied = "Applied"
 // ConditionReady is the condition type for VRouterBinding.
 // Status=True when all VRouterConfigs were reconciled successfully; Status=False on any reconcile error.
 const ConditionReady = "Ready"
+
+// BoolValue resolves a pointer bool field to a concrete value: nil means
+// "unset", so the given default is returned; otherwise the pointed-to value
+// is returned. This is used for fields such as Save and CheckGuestUptime
+// whose CRD default (+kubebuilder:default=true) is only applied by the API
+// server when the field is entirely absent from the request.
+func BoolValue(p *bool, def bool) bool {
+	if p == nil {
+		return def
+	}
+	return *p
+}
