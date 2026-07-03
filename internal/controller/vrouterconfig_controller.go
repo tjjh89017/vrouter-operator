@@ -234,7 +234,7 @@ func (r *VRouterConfigReconciler) pollExecStatus(ctx context.Context, cfg *vrout
 				Status:             metav1.ConditionFalse,
 				Reason:             "ApplyTimeout",
 				Message:            cfg.Status.Message,
-				ObservedGeneration: cfg.Generation,
+				ObservedGeneration: cfg.Status.ObservedGeneration,
 			})
 			return ctrl.Result{}, r.Status().Patch(ctx, cfg, patch)
 		}
@@ -251,6 +251,12 @@ func (r *VRouterConfigReconciler) pollExecStatus(ctx context.Context, cfg *vrout
 	patch := client.MergeFrom(cfg.DeepCopy())
 	cfg.Status.ExecPID = 0
 	cfg.Status.ExecStartedTime = nil
+	// Stamp the condition with status.ObservedGeneration -- the generation
+	// this exec was dispatched for in applyConfig -- rather than the current
+	// cfg.Generation. If the spec changed while the script was running,
+	// cfg.Generation may already have moved on to a generation that was
+	// never actually applied; the exec that just finished only speaks for
+	// the generation it was dispatched for.
 	if status.ExitCode == 0 {
 		now := metav1.Now()
 		cfg.Status.Phase = vrouterv1.PhaseApplied
@@ -261,7 +267,7 @@ func (r *VRouterConfigReconciler) pollExecStatus(ctx context.Context, cfg *vrout
 			Status:             metav1.ConditionTrue,
 			Reason:             "ConfigApplied",
 			Message:            "Configuration applied successfully.",
-			ObservedGeneration: cfg.Generation,
+			ObservedGeneration: cfg.Status.ObservedGeneration,
 		})
 		log.Info("config applied successfully")
 	} else {
@@ -272,7 +278,7 @@ func (r *VRouterConfigReconciler) pollExecStatus(ctx context.Context, cfg *vrout
 			Status:             metav1.ConditionFalse,
 			Reason:             "ConfigFailed",
 			Message:            cfg.Status.Message,
-			ObservedGeneration: cfg.Generation,
+			ObservedGeneration: cfg.Status.ObservedGeneration,
 		})
 		log.Info("config apply failed", "exitCode", status.ExitCode, "stderr", status.Stderr)
 	}
@@ -299,8 +305,20 @@ func (r *VRouterConfigReconciler) applyConfig(ctx context.Context, cfg *vrouterv
 	cfg.Status.ExecStartedTime = &now
 	cfg.Status.ObservedGeneration = cfg.Generation
 	cfg.Status.Phase = vrouterv1.PhaseApplying
-	cfg.Status.Message = ""
+	cfg.Status.Message = fmt.Sprintf("applying generation %d", cfg.Generation)
 	cfg.Status.LastRebootHandledTime = targetRebootTime
+	// A new generation is being dispatched, so any previous Applied=True
+	// condition is now stale (it describes a generation that is no longer
+	// current). Mark Applied=False for the generation being dispatched here
+	// so `kubectl wait --for=condition=Applied` does not return early against
+	// the old True condition while the new script is still running.
+	meta.SetStatusCondition(&cfg.Status.Conditions, metav1.Condition{
+		Type:               vrouterv1.ConditionApplied,
+		Status:             metav1.ConditionFalse,
+		Reason:             "Applying",
+		Message:            cfg.Status.Message,
+		ObservedGeneration: cfg.Status.ObservedGeneration,
+	})
 	if err := r.Status().Patch(ctx, cfg, patch); err != nil {
 		return ctrl.Result{}, err
 	}
