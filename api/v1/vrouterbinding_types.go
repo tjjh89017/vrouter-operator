@@ -31,8 +31,11 @@ type VRouterBindingSpec struct {
 	// +optional
 	TemplateRefs []NameRef `json:"templateRefs,omitempty"`
 	TargetRefs   []NameRef `json:"targetRefs"`
+	// Save controls whether the applied configuration is persisted so it
+	// survives a reboot. Defaults to true when unset.
 	// +kubebuilder:default=true
-	Save bool `json:"save,omitempty"`
+	// +optional
+	Save *bool `json:"save,omitempty"`
 	// +kubebuilder:pruning:PreserveUnknownFields
 	// +kubebuilder:validation:Schemaless
 	// +optional

@@ -24,8 +24,11 @@ import (
 type VRouterConfigSpec struct {
 	// TargetRef references the VRouterTarget that describes the provider and router.
 	TargetRef NameRef `json:"targetRef"`
+	// Save controls whether the applied configuration is persisted so it
+	// survives a reboot. Defaults to true when unset.
 	// +kubebuilder:default=true
-	Save bool `json:"save,omitempty"`
+	// +optional
+	Save *bool `json:"save,omitempty"`
 	// +optional
 	Config string `json:"config,omitempty"`
 	// +optional
