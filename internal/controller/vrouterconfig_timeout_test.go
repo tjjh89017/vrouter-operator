@@ -200,6 +200,65 @@ func (p fakeExitedProvider) GetExecStatus(_ context.Context, _ int64) (*provider
 	return &providertypes.ExecStatus{Exited: true, ExitCode: p.exitCode}, nil
 }
 
+// TestPollExecStatus_PersistentPollError_TimesOutToFailed is the regression
+// test for the interaction between the lost-result recovery (86d31b1) and
+// the apply timeout (54ede3e): a GetExecStatus error that is never
+// classified as providertypes.ErrExecResultLost (e.g. the documented
+// KubeVirt/Proxmox "unknown pid after a guest agent restart" case) must
+// still be bounded by execApplyTimeout. Without this, pollExecStatus would
+// return the error on every reconcile before ever reaching the timeout
+// check, permanently pinning the config in Applying — and since
+// dispatchOrPoll routes straight to pollExecStatus whenever execPID > 0
+// (before the generation check), not even a spec update could force a new
+// apply.
+func TestPollExecStatus_PersistentPollError_TimesOutToFailed(t *testing.T) {
+	startedLongAgo := metav1.NewTime(time.Now().Add(-2 * execApplyTimeout))
+	cfg := &vrouterv1.VRouterConfig{
+		ObjectMeta: metav1.ObjectMeta{Name: "c4", Namespace: "default", Generation: 1},
+		Spec: vrouterv1.VRouterConfigSpec{
+			TargetRef: vrouterv1.NameRef{Name: "r1"},
+			Config:    "set system host-name test",
+		},
+		Status: vrouterv1.VRouterConfigStatus{
+			Phase:              vrouterv1.PhaseApplying,
+			ExecPID:            42,
+			ExecStartedTime:    &startedLongAgo,
+			ObservedGeneration: 1,
+		},
+	}
+
+	r, cl := newFakeReconciler(t, cfg)
+
+	result, err := r.pollExecStatus(context.Background(), cfg, fakeTransientErrProvider{})
+	if err != nil {
+		t.Fatalf("pollExecStatus returned error, want nil (a persistent poll error past the timeout must fail the config, not retry forever): %v", err)
+	}
+	if result.RequeueAfter != 0 {
+		t.Errorf("result = %+v, want no requeue-for-retry after a timeout (Failed has no auto-retry)", result)
+	}
+
+	var got vrouterv1.VRouterConfig
+	if err := cl.Get(context.Background(), k8stypes.NamespacedName{Name: "c4", Namespace: "default"}, &got); err != nil {
+		t.Fatalf("get updated config: %v", err)
+	}
+	if got.Status.Phase != vrouterv1.PhaseFailed {
+		t.Errorf("status.phase = %q, want %q", got.Status.Phase, vrouterv1.PhaseFailed)
+	}
+	if got.Status.ExecPID != 0 {
+		t.Errorf("status.execPID = %d, want 0 (cleared so a later change can re-dispatch)", got.Status.ExecPID)
+	}
+	if got.Status.ExecStartedTime != nil {
+		t.Errorf("status.execStartedTime = %v, want nil (cleared)", got.Status.ExecStartedTime)
+	}
+	cond := findAppliedCondition(got.Status.Conditions)
+	if cond == nil {
+		t.Fatalf("expected an Applied condition to be set")
+	}
+	if cond.Status != metav1.ConditionFalse {
+		t.Errorf("Applied condition status = %q, want %q", cond.Status, metav1.ConditionFalse)
+	}
+}
+
 // findAppliedCondition returns the Applied condition from a condition list,
 // or nil if not present.
 func findAppliedCondition(conditions []metav1.Condition) *metav1.Condition {
