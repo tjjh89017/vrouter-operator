@@ -8,6 +8,7 @@ jobs:
   test:
     name: Run on Ubuntu
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - name: Clone the code
         uses: actions/checkout@v6
@@ -16,6 +17,12 @@ jobs:
         uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
+
+      - name: Cache tool binaries
+        uses: actions/cache@v4
+        with:
+          path: bin
+          key: ${{ runner.os }}-tools-${{ hashFiles('Makefile', 'go.mod') }}
 
       - name: Run tests
         run: make test
@@ -23,6 +30,7 @@ jobs:
   generated-files:
     name: Check generated files are up to date
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Clone the code
         uses: actions/checkout@v6
@@ -31,6 +39,12 @@ jobs:
         uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
+
+      - name: Cache tool binaries
+        uses: actions/cache@v4
+        with:
+          path: bin
+          key: ${{ runner.os }}-tools-${{ hashFiles('Makefile', 'go.mod') }}
 
       - name: Generate manifests and code
         run: make manifests generate
