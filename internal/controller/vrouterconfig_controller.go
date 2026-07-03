@@ -130,7 +130,8 @@ func (r *VRouterConfigReconciler) checkReadyAndDispatch(ctx context.Context, cfg
 		return ctrl.Result{}, err
 	}
 
-	// Step 1: pre-check — QGA ping + vyos-router.service is-active.
+	// Step 1: pre-check — QGA ping, then poll vyos-router.service SubState
+	// until it reports "exited" (oneshot unit; "finished" != "is-active/running").
 	if err := prov.CheckReady(ctx); err != nil {
 		return r.handleCheckReadyFailure(ctx, cfg, err)
 	}

@@ -225,7 +225,10 @@ func (p *Provider) IsVMRunning(ctx context.Context) (bool, error) {
 	return result.Data.Status == "running", nil
 }
 
-// CheckReady verifies QGA is responsive and vyos-router.service is active.
+// CheckReady verifies QGA responds to ping, then polls the SubState of
+// vyos-router.service until it reports "exited" — the service is a oneshot
+// unit that runs to completion, so readiness is "has finished", not
+// "is-active/running".
 func (p *Provider) CheckReady(ctx context.Context) error {
 	node, err := p.resolveNode(ctx)
 	if err != nil {
