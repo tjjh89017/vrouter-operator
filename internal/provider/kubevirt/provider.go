@@ -178,6 +178,17 @@ func (p *Provider) ExecScript(ctx context.Context, config, commands string, save
 }
 
 // GetExecStatus polls the result of a previously started script via guest-exec-status.
+//
+// Known limitation: if the guest agent restarted (e.g. after a VM reboot) and
+// no longer knows about pid, guest-exec-status returns a QGA error here that
+// is surfaced as a plain error, not providertypes.ErrExecResultLost. The QGA
+// "unknown pid" error is not reliably distinguishable from other QGA/SPDY
+// failures (e.g. a transient exec-into-pod hiccup) from runQGA's error
+// string alone, and misclassifying a transient failure as "lost" would cause
+// the controller to needlessly re-run the apply script. See
+// providertypes.ErrExecResultLost for the intended signal; wire it up here
+// once a reliable "unknown pid" signal is available (e.g. a QGA error class
+// in the response).
 func (p *Provider) GetExecStatus(ctx context.Context, pid int64) (*providertypes.ExecStatus, error) {
 	resp, err := p.runQGA(ctx, fmt.Sprintf(qga.CmdExecStatus, pid))
 	if err != nil {

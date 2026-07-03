@@ -18,7 +18,25 @@ limitations under the License.
 // all provider implementations.
 package types
 
-import "context"
+import (
+	"context"
+	"errors"
+)
+
+// ErrExecResultLost is returned by GetExecStatus when the result of a
+// previously dispatched ExecScript call can no longer be found — for example
+// because the operator process restarted (in-memory registry lost) or the
+// guest agent that owned the PID restarted (e.g. after a VM reboot).
+//
+// Callers must treat this differently from a transient error: the handle is
+// gone for good, so retrying GetExecStatus with the same handle will never
+// succeed. The caller should give up on the handle and re-dispatch instead
+// of retrying indefinitely.
+//
+// Provider implementations should wrap this with fmt.Errorf("...: %w", ...)
+// so context is preserved while errors.Is(err, ErrExecResultLost) still
+// matches.
+var ErrExecResultLost = errors.New("exec result lost (handle unknown to provider)")
 
 // ExecStatus represents the result of a previously started async script execution.
 type ExecStatus struct {

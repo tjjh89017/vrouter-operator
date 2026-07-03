@@ -176,7 +176,7 @@ func (p *Provider) ExecScript(_ context.Context, config, commands string, _ bool
 func (p *Provider) GetExecStatus(_ context.Context, pid int64) (*types.ExecStatus, error) {
 	v, ok := execMap.Load(pid)
 	if !ok {
-		return nil, fmt.Errorf("no pending exec for pid %d (operator may have restarted)", pid)
+		return nil, fmt.Errorf("no pending exec for pid %d (operator may have restarted): %w", pid, types.ErrExecResultLost)
 	}
 	entry := v.(*execEntry)
 

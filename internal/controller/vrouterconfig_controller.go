@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -37,6 +38,7 @@ import (
 
 	vrouterv1 "github.com/tjjh89017/vrouter-operator/api/v1"
 	"github.com/tjjh89017/vrouter-operator/internal/provider"
+	providertypes "github.com/tjjh89017/vrouter-operator/internal/provider/types"
 )
 
 // VRouterConfigReconciler reconciles a VRouterConfig object.
@@ -153,6 +155,23 @@ func (r *VRouterConfigReconciler) pollExecStatus(ctx context.Context, cfg *vrout
 
 	status, err := prov.GetExecStatus(ctx, cfg.Status.ExecPID)
 	if err != nil {
+		if errors.Is(err, providertypes.ErrExecResultLost) {
+			// The previously dispatched exec handle is gone for good (operator
+			// restart lost its in-memory registry, or the guest agent that owned
+			// the PID restarted after a VM reboot). Retrying GetExecStatus with
+			// the same handle will never succeed, so give up on it and reset to
+			// Pending: the next reconcile's generation check in onChange will
+			// re-dispatch a fresh ExecScript call instead of looping forever.
+			log.Info("exec result lost, resetting to re-dispatch", "pid", cfg.Status.ExecPID, "reason", err.Error())
+			patch := client.MergeFrom(cfg.DeepCopy())
+			cfg.Status.ExecPID = 0
+			cfg.Status.Phase = vrouterv1.PhasePending
+			cfg.Status.Message = "previous apply result was lost; re-applying"
+			if patchErr := r.Status().Patch(ctx, cfg, patch); patchErr != nil {
+				return ctrl.Result{}, patchErr
+			}
+			return ctrl.Result{RequeueAfter: requeueAfter}, nil
+		}
 		return ctrl.Result{}, fmt.Errorf("get exec status: %w", err)
 	}
 

@@ -266,6 +266,17 @@ func (p *Provider) ExecScript(ctx context.Context, config, commands string, save
 }
 
 // GetExecStatus polls the result of a previously started script.
+//
+// Known limitation: if the guest agent restarted (e.g. after a VM reboot)
+// and no longer knows about pid, the Proxmox agent/exec-status endpoint
+// returns an HTTP error here that is surfaced as a plain error, not
+// providertypes.ErrExecResultLost. That HTTP error is not reliably
+// distinguishable from other transport/API failures (e.g. a transient
+// network blip) using only the status code and body available in get(), and
+// misclassifying a transient failure as "lost" would cause the controller
+// to needlessly re-run the apply script. See providertypes.ErrExecResultLost
+// for the intended signal; wire it up here once a reliable "unknown pid"
+// signal is available.
 func (p *Provider) GetExecStatus(ctx context.Context, pid int64) (*providertypes.ExecStatus, error) {
 	node, err := p.resolveNode(ctx)
 	if err != nil {
