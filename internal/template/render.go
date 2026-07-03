@@ -70,6 +70,14 @@ func MergeParams(base, override apiextensionsv1.JSON) (map[string]any, error) {
 	if err != nil {
 		return nil, fmt.Errorf("decode override params: %w", err)
 	}
+	// mergo.WithOverride makes override zero values (false, "", 0) win over
+	// base values, not just non-zero ones. Once JSON is decoded there is no
+	// way to distinguish "explicitly set to false" from "absent", so a
+	// truthy base default (e.g. firewall.enabled: true) can be silently
+	// turned off by an override that merely mentions the key. See
+	// merge_params_test.go for characterization tests pinning this
+	// behavior and docs/SPEC.md §4.3, which is still pending a correction
+	// to match reality.
 	if err := mergo.Merge(&baseMap, overMap,
 		mergo.WithOverride,
 		mergo.WithOverrideEmptySlice,
