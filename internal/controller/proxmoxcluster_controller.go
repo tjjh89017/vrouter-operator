@@ -168,7 +168,7 @@ func (r *ProxmoxClusterReconciler) onChange(ctx context.Context, _ ctrl.Request,
 			changed = true
 		}
 		// Reboot detection via guest OS uptime through QGA (detects soft reboot too).
-		if cluster.Spec.CheckGuestUptime && info.node != "" {
+		if vrouterv1.BoolValue(cluster.Spec.CheckGuestUptime, true) && info.node != "" {
 			guestUptime, err := r.fetchGuestUptime(ctx, cluster, info.node, px.VMID, tokenID, tokenSecret)
 			if err != nil {
 				log.Info("fetch guest uptime skipped", "target", t.Name, "reason", err.Error())
