@@ -35,9 +35,14 @@ import (
 // pure helper functions (default, required, has, toYaml, range, etc.).
 var deniedFuncs = []string{"env", "expandenv", "getHostByName"}
 
-// templateFuncs returns the sprig function map with dangerous functions
-// removed, so they are unavailable to templates ("function ... not defined").
-func templateFuncs() template.FuncMap {
+// Funcs returns the sprig function map with dangerous functions removed, so
+// they are unavailable to templates ("function ... not defined"). This is the
+// single source of truth for which functions templates may use: it backs both
+// Render (controller-side rendering) and the VRouterTemplate validating
+// webhook (admission-side syntax check, see SPEC §6.2), so a template using a
+// removed function is rejected at admission instead of only failing later at
+// reconcile.
+func Funcs() template.FuncMap {
 	funcs := sprig.TxtFuncMap()
 	for _, name := range deniedFuncs {
 		delete(funcs, name)
@@ -47,7 +52,7 @@ func templateFuncs() template.FuncMap {
 
 // Render executes a Go text/template with sprig functions against the given data map.
 func Render(tmplStr string, data map[string]any) (string, error) {
-	tmpl, err := template.New("").Funcs(templateFuncs()).Parse(tmplStr)
+	tmpl, err := template.New("").Funcs(Funcs()).Parse(tmplStr)
 	if err != nil {
 		return "", fmt.Errorf("parse template: %w", err)
 	}
