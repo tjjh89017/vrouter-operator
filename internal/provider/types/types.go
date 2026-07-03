@@ -51,8 +51,13 @@ type ExecStatus struct {
 type Provider interface {
 	// IsVMRunning checks whether the underlying VM is in a running (non-stopped) state.
 	IsVMRunning(ctx context.Context) (bool, error)
-	// CheckReady verifies the router is reachable and ready to accept config
-	// (QGA ping + vyos-router.service is-active).
+	// CheckReady verifies the router is reachable and ready to accept config.
+	// KubeVirt/Proxmox: QGA responds to ping, then polls
+	// `systemctl show -p SubState vyos-router.service` until it exits and
+	// reports substate "exited" — vyos-router is a oneshot unit that runs to
+	// completion, so readiness is "has finished", not "is-active/running".
+	// vrouter-daemon: no-op (a successful IsVMRunning already implies the
+	// agent connection is up and ready).
 	CheckReady(ctx context.Context) error
 	// ExecScript renders and applies the given VyOS config asynchronously.
 	// config is a VyOS config block, commands is a list of configure-mode commands,
