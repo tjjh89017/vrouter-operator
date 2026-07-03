@@ -392,7 +392,7 @@ Performs cross-field validation and reference checks that kubebuilder JSON schem
 | VRouterTemplate | `spec.config` and `spec.commands`, when set, must each parse as valid Go `text/template` syntax (parsed with the same sprig FuncMap used at render time — see §5.1); a syntax error is rejected at admission instead of surfacing later as a render failure |
 | ProxmoxCluster | `spec.endpoints` must be non-empty, and no entry may be an empty string; `spec.syncInterval` must be greater than zero; `spec.credentialsRef.name` must be non-empty |
 
-All reference-existence and cross-namespace checks above are skipped during `ValidateUpdate` when the object already has a non-nil `deletionTimestamp`. This matters for the finalizer-removal update that every controller's `onDelete` performs (see §7): without the skip, a reference that has already been deleted (or a pre-existing cross-namespace reference — see the upgrade caveat below) would make that final update fail admission and deadlock deletion.
+For VRouterTarget, VRouterConfig, VRouterBinding, and ProxmoxCluster, the entire table of checks above (not just the reference-existence and cross-namespace checks) is skipped during `ValidateUpdate` once the object already has a non-nil `deletionTimestamp`. This matters for the finalizer-removal update that every controller's `onDelete` performs (see §7): without the skip, a spec that is now stale — a deleted reference, a pre-existing cross-namespace reference (see the upgrade caveat below), or even a plain presence check such as `kubevirt.name` or `credentialsRef.name` being empty — would make that final update fail admission and deadlock deletion.
 
 Webhooks are disabled when `ENABLE_WEBHOOKS=false` (env var, checked in `cmd/main.go`).
 
