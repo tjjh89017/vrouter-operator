@@ -70,7 +70,6 @@ func (d *ProxmoxClusterCustomDefaulter) Default(_ context.Context, obj runtime.O
 	return nil
 }
 
-// TODO(user): change verbs to "verbs=create;update;delete" if you want to enable deletion validation.
 // NOTE: The 'path' attribute must follow a specific pattern and should not be modified directly here.
 // Modifying the path for an invalid path can cause API server errors; failing to locate the webhook.
 // +kubebuilder:webhook:path=/validate-vrouter-kojuro-date-v1-proxmoxcluster,mutating=false,failurePolicy=fail,sideEffects=None,groups=vrouter.kojuro.date,resources=proxmoxclusters,verbs=create;update,versions=v1,name=vproxmoxcluster-v1.kb.io,admissionReviewVersions=v1
@@ -81,7 +80,6 @@ func (d *ProxmoxClusterCustomDefaulter) Default(_ context.Context, obj runtime.O
 // NOTE: The +kubebuilder:object:generate=false marker prevents controller-gen from generating DeepCopy methods,
 // as this struct is used only for temporary operations and does not need to be deeply copied.
 type ProxmoxClusterCustomValidator struct {
-	// TODO(user): Add more fields as needed for validation
 }
 
 var _ webhook.CustomValidator = &ProxmoxClusterCustomValidator{}
@@ -94,22 +92,51 @@ func (v *ProxmoxClusterCustomValidator) ValidateCreate(_ context.Context, obj ru
 	}
 	proxmoxclusterlog.Info("Validation for ProxmoxCluster upon creation", "name", proxmoxcluster.GetName())
 
-	// TODO(user): fill in your validation logic upon object creation.
-
-	return nil, nil
+	return nil, validateProxmoxCluster(proxmoxcluster)
 }
 
 // ValidateUpdate implements webhook.CustomValidator so a webhook will be registered for the type ProxmoxCluster.
-func (v *ProxmoxClusterCustomValidator) ValidateUpdate(_ context.Context, oldObj, newObj runtime.Object) (admission.Warnings, error) {
+func (v *ProxmoxClusterCustomValidator) ValidateUpdate(_ context.Context, _, newObj runtime.Object) (admission.Warnings, error) {
 	proxmoxcluster, ok := newObj.(*vrouterv1.ProxmoxCluster)
 	if !ok {
 		return nil, fmt.Errorf("expected a ProxmoxCluster object for the newObj but got %T", newObj)
 	}
 	proxmoxclusterlog.Info("Validation for ProxmoxCluster upon update", "name", proxmoxcluster.GetName())
 
-	// TODO(user): fill in your validation logic upon object update.
+	// Skip validation while the object is being deleted. The spec may already be
+	// stale by then, and rejecting the update (e.g. finalizer removal) here would
+	// deadlock deletion of the ProxmoxCluster.
+	if !proxmoxcluster.GetDeletionTimestamp().IsZero() {
+		return nil, nil
+	}
 
-	return nil, nil
+	return nil, validateProxmoxCluster(proxmoxcluster)
+}
+
+// validateProxmoxCluster checks that a ProxmoxCluster's spec is usable by the
+// controller before it is admitted. An empty endpoints list, a non-positive
+// syncInterval, or an empty credentialsRef.name would otherwise only surface
+// deep in reconcile (or, for syncInterval, as a hot-poll loop against the
+// Proxmox API), so we reject them here instead.
+func validateProxmoxCluster(cluster *vrouterv1.ProxmoxCluster) error {
+	if len(cluster.Spec.Endpoints) == 0 {
+		return fmt.Errorf("spec.endpoints must not be empty")
+	}
+	for i, endpoint := range cluster.Spec.Endpoints {
+		if endpoint == "" {
+			return fmt.Errorf("spec.endpoints[%d] must not be empty", i)
+		}
+	}
+
+	if cluster.Spec.SyncInterval.Duration <= 0 {
+		return fmt.Errorf("spec.syncInterval must be greater than zero")
+	}
+
+	if cluster.Spec.CredentialsRef.Name == "" {
+		return fmt.Errorf("spec.credentialsRef.name must be set")
+	}
+
+	return nil
 }
 
 // ValidateDelete implements webhook.CustomValidator so a webhook will be registered for the type ProxmoxCluster.
