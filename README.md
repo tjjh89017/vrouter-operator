@@ -98,9 +98,12 @@ helm install vrouter-operator ./charts/vrouter-operator \
   --set controllerManager.manager.image.tag=v0.1.0
 
 # Disable webhooks (dev/testing only — no validation)
+# Webhooks are controlled by the ENABLE_WEBHOOKS env var read in cmd/main.go,
+# not a CLI flag, so set it via controllerManager.manager.env.
 helm install vrouter-operator ./charts/vrouter-operator \
   --namespace vrouter-system --create-namespace \
-  --set controllerManager.manager.args="{--metrics-bind-address=:8443,--leader-elect,--health-probe-bind-address=:8081,--enable-webhooks=false}"
+  --set controllerManager.manager.env[0].name=ENABLE_WEBHOOKS \
+  --set-string controllerManager.manager.env[0].value=false
 
 # Pull from a private registry
 helm install vrouter-operator ./charts/vrouter-operator \
@@ -480,7 +483,7 @@ The validating webhook enforces rules that the CRD schema alone can't express �
 - A `VRouterTarget` cannot be deleted while any `VRouterBinding` or `VRouterConfig` in the same namespace still references it.
 - `VRouterTemplate.spec.config`/`commands` must parse as valid `text/template` syntax at admission time, not just at render time.
 
-Webhooks require cert-manager for TLS (see [Installation](#installation)) and can be disabled with `--enable-webhooks=false` (dev/testing only — disables all of the above validation).
+Webhooks require cert-manager for TLS (see [Installation](#installation)) and can be disabled with the `ENABLE_WEBHOOKS=false` environment variable (dev/testing only — disables all of the above validation). For Helm installs, set it via `--set controllerManager.manager.env[0].name=ENABLE_WEBHOOKS --set-string controllerManager.manager.env[0].value=false` (see [Common values overrides](#common-values-overrides)); for local development, run `ENABLE_WEBHOOKS=false go run ./cmd/main.go`.
 
 ---
 
