@@ -24,6 +24,7 @@ import (
 	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -38,6 +39,15 @@ import (
 	"github.com/tjjh89017/vrouter-operator/internal/provider/qga"
 	providertypes "github.com/tjjh89017/vrouter-operator/internal/provider/types"
 )
+
+// errVMNotFound indicates a live /cluster/resources lookup did not find the
+// VM's VMID at all — i.e. the VM has been destroyed, not merely stopped.
+// IsVMRunning treats this as "not running" rather than propagating an error,
+// so a destroyed VM is reported the same clean way as one Proxmox reports as
+// stopped via a 404 on /status/current. Other operations (CheckReady,
+// ExecScript, GetExecStatus) still need a live node to act on and correctly
+// surface this as an error.
+var errVMNotFound = errors.New("VMID not found in cluster")
 
 // Provider implements provider.Provider for Proxmox VE via the REST API + QGA.
 type Provider struct {
@@ -172,13 +182,23 @@ func (p *Provider) resolveNode(ctx context.Context) (string, error) {
 			return vm.Node, nil
 		}
 	}
-	return "", fmt.Errorf("VMID %d not found in cluster", p.vmid)
+	return "", fmt.Errorf("VMID %d not found in cluster: %w", p.vmid, errVMNotFound)
 }
 
 // IsVMRunning returns true if the VM is in running state.
 func (p *Provider) IsVMRunning(ctx context.Context) (bool, error) {
 	node, err := p.resolveNode(ctx)
 	if err != nil {
+		if errors.Is(err, errVMNotFound) {
+			// The VM has been destroyed (its VMID is absent from a live
+			// cluster resources lookup, e.g. after ProxmoxClusterController
+			// clears a stale status.proxmoxNode per SPEC.md §7.3 step 4a).
+			// Report this the same way as a stopped VM instead of surfacing
+			// an error, so callers (VRouterTargetReconciler,
+			// VRouterConfigReconciler) take the clean "not running" path
+			// instead of looping on a reconcile error.
+			return false, nil
+		}
 		return false, err
 	}
 

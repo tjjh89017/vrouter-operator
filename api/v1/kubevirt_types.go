@@ -22,6 +22,12 @@ const ProviderKubeVirt ProviderType = "kubevirt"
 type KubeVirtConfig struct {
 	// Name of the VirtualMachine / VirtualMachineInstance.
 	Name string `json:"name"`
+	// Namespace the VirtualMachine / VirtualMachineInstance lives in. Defaults
+	// to the VRouterTarget's own namespace when omitted. Unlike Proxmox's
+	// ClusterRef, this is not a same-namespace-restricted reference to
+	// another CRD in this cluster — it names where the remote VMI itself
+	// lives (optionally in a different cluster via Kubeconfig), so an
+	// explicit cross-namespace value is allowed by design.
 	// +optional
 	Namespace string `json:"namespace,omitempty"`
 	// +optional

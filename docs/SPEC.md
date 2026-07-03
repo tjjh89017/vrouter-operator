@@ -169,7 +169,7 @@ spec:
 ```
 
 - `provider.type` defaults to `kubevirt` if omitted
-- For KubeVirt, `kubevirt.name` identifies the VM; defaults to same cluster; optionally specify a remote kubeconfig via Secret
+- For KubeVirt, `kubevirt.name` identifies the VM; `kubevirt.namespace` defaults to this VRouterTarget's own namespace if omitted (an explicit different namespace is allowed, see §9.6); defaults to same cluster; optionally specify a remote kubeconfig via Secret
 - For Proxmox, `proxmox.vmid` identifies the VM; `clusterRef` references a ProxmoxCluster resource
 - For vrouter-daemon, `daemon.address` (gRPC endpoint) and `daemon.agentID` identify the target router agent; see README.md for deployment details
 - **Same-namespace-only references**: `proxmox.clusterRef.namespace`, if set, must equal the VRouterTarget's own namespace. The validating webhook rejects a `clusterRef` pointing at a different namespace — see §6.2 for the full same-namespace policy and why it exists.
@@ -614,7 +614,7 @@ kubectl wait --for=condition=Applied vrouterconfig/myconfig --timeout=60s
 ```
 
 **Purpose of `proxmoxNode` and `lastRebootTime`:**
-- `proxmoxNode`: The provider factory reads this to build the Proxmox provider with the correct node name, since Proxmox QGA commands are node-scoped. Step 4a clears it to `""` (rather than leaving the previous value) when the VMID is absent from `/cluster/resources` — e.g. the VM was destroyed. Leaving a stale node cached here would otherwise let the provider factory's cached-node fallback target the wrong host if the same VMID is later reused on a different node.
+- `proxmoxNode`: The provider factory reads this to build the Proxmox provider with the correct node name, since Proxmox QGA commands are node-scoped. Step 4a clears it to `""` (rather than leaving the previous value) when the VMID is absent from `/cluster/resources` — e.g. the VM was destroyed. Leaving a stale node cached here would otherwise let the provider factory's cached-node fallback target the wrong host if the same VMID is later reused on a different node. When `proxmoxNode` is `""`, the Proxmox provider falls back to a live `/cluster/resources` lookup on the next operation; if that lookup still cannot find the VMID (VM genuinely gone, not just moved), `IsVMRunning` reports "not running" rather than surfacing an error, so VRouterTargetController and VRouterConfigController take the same clean stopped path as an ordinary 404 from `/status/current` instead of looping on a reconcile error.
 - `lastRebootTime`: VRouterController (§7.2) compares this against the last reboot it has already dispatched a forced re-apply for, to force re-apply after a reboot at most once per reboot. Deriving it as `bootTime = observedAt - uptime` (rather than stamping the sync's wall-clock time directly) and only advancing it when the new bootTime is meaningfully newer than the stored one means repeated syncs during the same reboot's low-uptime window settle on one stable value instead of continuously advancing lastRebootTime — which would otherwise make VRouterController force a redundant re-apply on every sync until uptime crossed the threshold.
 
 ---
@@ -942,6 +942,8 @@ type KubeconfigRef struct {
     SecretRef SecretKeyRef `json:"secretRef"`
 }
 ```
+
+`kubevirt.namespace` is optional and defaults to the VRouterTarget's own namespace when omitted (applied consistently by `provider.New`, and by the VMI-watch mapping functions in VRouterTargetController and VRouterConfigController). Unlike `proxmox.clusterRef` (§9.7), this is not a same-namespace-restricted reference to another CRD in this cluster — it identifies where the remote VMI itself lives, optionally in a different cluster via `kubeconfig` — so an explicit cross-namespace value is accepted and not rejected by the validating webhook.
 
 ### 9.7 Proxmox Types
 
