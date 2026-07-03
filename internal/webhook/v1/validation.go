@@ -32,6 +32,9 @@ func validateProviderConfig(provider vrouterv1.ProviderConfig, namespace string)
 		if provider.KubeVirt == nil {
 			return fmt.Errorf("provider.kubevirt must be set when type is kubevirt")
 		}
+		if provider.KubeVirt.Name == "" {
+			return fmt.Errorf("provider.kubevirt.name must not be empty")
+		}
 	case vrouterv1.ProviderProxmox:
 		if provider.Proxmox == nil {
 			return fmt.Errorf("provider.proxmox must be set when type is proxmox")
