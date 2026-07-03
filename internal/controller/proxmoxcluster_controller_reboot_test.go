@@ -169,10 +169,10 @@ func TestOnChange_SlowGuestUptimePoll_DoesNotRestampSameReboot(t *testing.T) {
 		syncCount.Add(1)
 		// Host-level (Proxmox) uptime is reported far above the threshold so
 		// only the guest-uptime (QGA) path under test can fire.
-		fmt.Fprintf(w, `{"data":[{"vmid":%d,"node":%q,"uptime":999999}]}`, vmid, node)
+		_, _ = fmt.Fprintf(w, `{"data":[{"vmid":%d,"node":%q,"uptime":999999}]}`, vmid, node)
 	})
 	mux.HandleFunc(fmt.Sprintf("/api2/json/nodes/%s/qemu/%d/agent/exec", node, vmid), func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`{"data":{"pid":123}}`))
+		_, _ = w.Write([]byte(`{"data":{"pid":123}}`))
 	})
 	mux.HandleFunc(fmt.Sprintf("/api2/json/nodes/%s/qemu/%d/agent/exec-status", node, vmid), func(w http.ResponseWriter, r *http.Request) {
 		if syncCount.Load() == 1 {
@@ -271,7 +271,7 @@ func TestOnChange_SlowGuestUptimePoll_DoesNotRestampSameReboot(t *testing.T) {
 	if got2.Status.LastRebootTime == nil {
 		t.Fatalf("after sync 2: LastRebootTime is nil, want still set")
 	}
-	if diff := got2.Status.LastRebootTime.Time.Sub(firstBoot); diff.Abs() > rebootTimeTolerance {
+	if diff := got2.Status.LastRebootTime.Sub(firstBoot); diff.Abs() > rebootTimeTolerance {
 		t.Fatalf("after sync 2: LastRebootTime moved by %v (want within tolerance %v of sync 1's value %v, got %v) -- "+
 			"a slow guest-agent poll on one sync must not make the next sync look like a new reboot",
 			diff, rebootTimeTolerance, firstBoot, got2.Status.LastRebootTime.Time)

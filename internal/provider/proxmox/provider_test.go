@@ -141,13 +141,13 @@ func newCachedNodeProvider(handler http.Handler) (*Provider, *httptest.Server) {
 func TestCheckReady_Success(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc(fmt.Sprintf("/api2/json/nodes/%s/qemu/%d/agent/ping", testNode, testVMID), func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`{"data":{}}`))
+		_, _ = w.Write([]byte(`{"data":{}}`))
 	})
 	mux.HandleFunc(fmt.Sprintf("/api2/json/nodes/%s/qemu/%d/agent/exec", testNode, testVMID), func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`{"data":{"pid":123}}`))
+		_, _ = w.Write([]byte(`{"data":{"pid":123}}`))
 	})
 	mux.HandleFunc(fmt.Sprintf("/api2/json/nodes/%s/qemu/%d/agent/exec-status", testNode, testVMID), func(w http.ResponseWriter, r *http.Request) {
-		w.Write(execStatusResponse(true, 0, "exited", ""))
+		_, _ = w.Write(execStatusResponse(true, 0, "exited", ""))
 	})
 	p, srv := newCachedNodeProvider(mux)
 	defer srv.Close()
@@ -164,7 +164,7 @@ func TestCheckReady_AgentPingFails(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc(fmt.Sprintf("/api2/json/nodes/%s/qemu/%d/agent/ping", testNode, testVMID), func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
-		w.Write([]byte(`{"data":{}}`))
+		_, _ = w.Write([]byte(`{"data":{}}`))
 	})
 	mux.HandleFunc(fmt.Sprintf("/api2/json/nodes/%s/qemu/%d/agent/exec", testNode, testVMID), func(w http.ResponseWriter, r *http.Request) {
 		t.Fatalf("agent/exec must not be called when the ping already failed")
@@ -187,13 +187,13 @@ func TestCheckReady_AgentPingFails(t *testing.T) {
 func TestCheckReady_SubstateCheckNonZeroExit(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc(fmt.Sprintf("/api2/json/nodes/%s/qemu/%d/agent/ping", testNode, testVMID), func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`{"data":{}}`))
+		_, _ = w.Write([]byte(`{"data":{}}`))
 	})
 	mux.HandleFunc(fmt.Sprintf("/api2/json/nodes/%s/qemu/%d/agent/exec", testNode, testVMID), func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`{"data":{"pid":123}}`))
+		_, _ = w.Write([]byte(`{"data":{"pid":123}}`))
 	})
 	mux.HandleFunc(fmt.Sprintf("/api2/json/nodes/%s/qemu/%d/agent/exec-status", testNode, testVMID), func(w http.ResponseWriter, r *http.Request) {
-		w.Write(execStatusResponse(true, 1, "", "systemctl: command not found"))
+		_, _ = w.Write(execStatusResponse(true, 1, "", "systemctl: command not found"))
 	})
 	p, srv := newCachedNodeProvider(mux)
 	defer srv.Close()
@@ -213,13 +213,13 @@ func TestCheckReady_SubstateCheckNonZeroExit(t *testing.T) {
 func TestCheckReady_SubstateNotExited_Rejected(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc(fmt.Sprintf("/api2/json/nodes/%s/qemu/%d/agent/ping", testNode, testVMID), func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`{"data":{}}`))
+		_, _ = w.Write([]byte(`{"data":{}}`))
 	})
 	mux.HandleFunc(fmt.Sprintf("/api2/json/nodes/%s/qemu/%d/agent/exec", testNode, testVMID), func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`{"data":{"pid":123}}`))
+		_, _ = w.Write([]byte(`{"data":{"pid":123}}`))
 	})
 	mux.HandleFunc(fmt.Sprintf("/api2/json/nodes/%s/qemu/%d/agent/exec-status", testNode, testVMID), func(w http.ResponseWriter, r *http.Request) {
-		w.Write(execStatusResponse(true, 0, "running", ""))
+		_, _ = w.Write(execStatusResponse(true, 0, "running", ""))
 	})
 	p, srv := newCachedNodeProvider(mux)
 	defer srv.Close()
@@ -240,17 +240,17 @@ func TestCheckReady_PollsUntilSubstateCheckExits(t *testing.T) {
 	var pollCount atomic.Int32
 	mux := http.NewServeMux()
 	mux.HandleFunc(fmt.Sprintf("/api2/json/nodes/%s/qemu/%d/agent/ping", testNode, testVMID), func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`{"data":{}}`))
+		_, _ = w.Write([]byte(`{"data":{}}`))
 	})
 	mux.HandleFunc(fmt.Sprintf("/api2/json/nodes/%s/qemu/%d/agent/exec", testNode, testVMID), func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`{"data":{"pid":123}}`))
+		_, _ = w.Write([]byte(`{"data":{"pid":123}}`))
 	})
 	mux.HandleFunc(fmt.Sprintf("/api2/json/nodes/%s/qemu/%d/agent/exec-status", testNode, testVMID), func(w http.ResponseWriter, r *http.Request) {
 		if pollCount.Add(1) == 1 {
-			w.Write(execStatusResponse(false, 0, "", ""))
+			_, _ = w.Write(execStatusResponse(false, 0, "", ""))
 			return
 		}
-		w.Write(execStatusResponse(true, 0, "exited", ""))
+		_, _ = w.Write(execStatusResponse(true, 0, "exited", ""))
 	})
 	p, srv := newCachedNodeProvider(mux)
 	defer srv.Close()
@@ -268,15 +268,15 @@ func TestCheckReady_PollsUntilSubstateCheckExits(t *testing.T) {
 func TestCheckReady_ContextCanceledWhilePolling(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc(fmt.Sprintf("/api2/json/nodes/%s/qemu/%d/agent/ping", testNode, testVMID), func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`{"data":{}}`))
+		_, _ = w.Write([]byte(`{"data":{}}`))
 	})
 	mux.HandleFunc(fmt.Sprintf("/api2/json/nodes/%s/qemu/%d/agent/exec", testNode, testVMID), func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`{"data":{"pid":123}}`))
+		_, _ = w.Write([]byte(`{"data":{"pid":123}}`))
 	})
 	mux.HandleFunc(fmt.Sprintf("/api2/json/nodes/%s/qemu/%d/agent/exec-status", testNode, testVMID), func(w http.ResponseWriter, r *http.Request) {
 		// Always "still running" so CheckReady would poll forever without a
 		// working context-cancellation check.
-		w.Write(execStatusResponse(false, 0, "", ""))
+		_, _ = w.Write(execStatusResponse(false, 0, "", ""))
 	})
 	p, srv := newCachedNodeProvider(mux)
 	defer srv.Close()
@@ -308,10 +308,10 @@ func TestExecScript_WritesRenderedScriptAndReturnsPID(t *testing.T) {
 			t.Errorf("file-write path = %q, want %q", payload.File, qga.ScriptPath)
 		}
 		capturedContent = payload.Content
-		w.Write([]byte(`{"data":{}}`))
+		_, _ = w.Write([]byte(`{"data":{}}`))
 	})
 	mux.HandleFunc(fmt.Sprintf("/api2/json/nodes/%s/qemu/%d/agent/exec", testNode, testVMID), func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`{"data":{"pid":999}}`))
+		_, _ = w.Write([]byte(`{"data":{"pid":999}}`))
 	})
 	p, srv := newCachedNodeProvider(mux)
 	defer srv.Close()
@@ -351,7 +351,7 @@ func TestGetExecStatus_DecodesBase64OutDataAndFallsBackRawErrData(t *testing.T) 
 		body.Data.OutData = base64.StdEncoding.EncodeToString([]byte("hello stdout"))
 		body.Data.ErrData = "not-valid-base64!!!"
 		out, _ := json.Marshal(body)
-		w.Write(out)
+		_, _ = w.Write(out)
 	})
 	p, srv := newCachedNodeProvider(mux)
 	defer srv.Close()
@@ -377,7 +377,7 @@ func TestGetExecStatus_DecodesBase64OutDataAndFallsBackRawErrData(t *testing.T) 
 func TestTryDo_FirstEndpointDown_FallsBackToSecond(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc(fmt.Sprintf("/api2/json/nodes/%s/qemu/%d/agent/ping", testNode, testVMID), func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`{"data":{}}`))
+		_, _ = w.Write([]byte(`{"data":{}}`))
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
