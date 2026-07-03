@@ -58,6 +58,13 @@ type VRouterConfigReconciler struct {
 
 const requeueAfter = 3 * time.Second
 
+// execApplyTimeout bounds how long a dispatched apply script may run before
+// the controller gives up on it and fails the config, instead of polling
+// GetExecStatus forever. Without this bound, a script that never exits (a
+// blocked commit lock, a hung command) pins the config in Applying with no
+// failure path. This is a fixed constant rather than a CRD field for now.
+const execApplyTimeout = 5 * time.Minute
+
 func (r *VRouterConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	var cfg vrouterv1.VRouterConfig
 	if err := r.Get(ctx, req.NamespacedName, &cfg); err != nil {
@@ -196,6 +203,7 @@ func (r *VRouterConfigReconciler) pollExecStatus(ctx context.Context, cfg *vrout
 			log.Info("exec result lost, resetting to re-dispatch", "pid", cfg.Status.ExecPID, "reason", err.Error())
 			patch := client.MergeFrom(cfg.DeepCopy())
 			cfg.Status.ExecPID = 0
+			cfg.Status.ExecStartedTime = nil
 			cfg.Status.Phase = vrouterv1.PhasePending
 			cfg.Status.Message = "previous apply result was lost; re-applying"
 			if patchErr := r.Status().Patch(ctx, cfg, patch); patchErr != nil {
@@ -207,6 +215,30 @@ func (r *VRouterConfigReconciler) pollExecStatus(ctx context.Context, cfg *vrout
 	}
 
 	if !status.Exited {
+		if execStarted := cfg.Status.ExecStartedTime; execStarted != nil && time.Since(execStarted.Time) > execApplyTimeout {
+			// The script has been running longer than execApplyTimeout with no
+			// sign of exiting (e.g. a blocked commit lock or a hung command).
+			// Give up on this exec so it does not pin the config in Applying
+			// forever: fail the config, clear execPID/ExecStartedTime so a
+			// later generation change or reboot can dispatch a fresh attempt
+			// through the normal path, and do NOT requeue for retry (Failed
+			// has no auto-retry, same as any other apply failure).
+			log.Info("apply exec timed out, marking failed", "pid", cfg.Status.ExecPID, "startedAt", execStarted.Time, "timeout", execApplyTimeout)
+			patch := client.MergeFrom(cfg.DeepCopy())
+			cfg.Status.ExecPID = 0
+			cfg.Status.ExecStartedTime = nil
+			cfg.Status.Phase = vrouterv1.PhaseFailed
+			cfg.Status.Message = fmt.Sprintf("apply timed out after %s", execApplyTimeout)
+			meta.SetStatusCondition(&cfg.Status.Conditions, metav1.Condition{
+				Type:               vrouterv1.ConditionApplied,
+				Status:             metav1.ConditionFalse,
+				Reason:             "ApplyTimeout",
+				Message:            cfg.Status.Message,
+				ObservedGeneration: cfg.Generation,
+			})
+			return ctrl.Result{}, r.Status().Patch(ctx, cfg, patch)
+		}
+
 		patch := client.MergeFrom(cfg.DeepCopy())
 		cfg.Status.Phase = vrouterv1.PhaseApplying
 		if err := r.Status().Patch(ctx, cfg, patch); err != nil {
@@ -218,6 +250,7 @@ func (r *VRouterConfigReconciler) pollExecStatus(ctx context.Context, cfg *vrout
 	// Script exited — update status.
 	patch := client.MergeFrom(cfg.DeepCopy())
 	cfg.Status.ExecPID = 0
+	cfg.Status.ExecStartedTime = nil
 	if status.ExitCode == 0 {
 		now := metav1.Now()
 		cfg.Status.Phase = vrouterv1.PhaseApplied
@@ -260,8 +293,10 @@ func (r *VRouterConfigReconciler) applyConfig(ctx context.Context, cfg *vrouterv
 	}
 	log.Info("script dispatched", "pid", pid)
 
+	now := metav1.Now()
 	patch := client.MergeFrom(cfg.DeepCopy())
 	cfg.Status.ExecPID = pid
+	cfg.Status.ExecStartedTime = &now
 	cfg.Status.ObservedGeneration = cfg.Generation
 	cfg.Status.Phase = vrouterv1.PhaseApplying
 	cfg.Status.Message = ""
