@@ -179,10 +179,21 @@ func (r *ProxmoxClusterReconciler) onChange(ctx context.Context, _ ctrl.Request,
 			// Reboot detection via guest OS uptime through QGA (detects soft reboot too).
 			if vrouterv1.BoolValue(cluster.Spec.CheckGuestUptime, true) && info.node != "" {
 				guestUptime, err := r.fetchGuestUptime(ctx, cluster, info.node, px.VMID, tokenID, tokenSecret)
+				// fetchGuestUptime polls exec-status for up to 10s (well above
+				// rebootTimeTolerance), so the loop-level `now` captured before
+				// this call is not a reliable stand-in for "the moment
+				// guestUptime was measured". Using it would derive a bootTime
+				// that drifts by however long this particular poll happened to
+				// take, sync to sync — easily exceeding rebootTimeTolerance and
+				// causing the same reboot to be re-stamped on consecutive syncs,
+				// exactly what nextRebootTime's tolerance window exists to
+				// prevent. Take a fresh timestamp right after the measurement
+				// instead.
+				guestNow := metav1.Now()
 				if err != nil {
 					log.Info("fetch guest uptime skipped", "target", t.Name, "reason", err.Error())
 				} else if guestUptime > 0 && guestUptime <= threshold {
-					if rt := nextRebootTime(now.Time, secondsToDuration(guestUptime), t.Status.LastRebootTime); rt != nil {
+					if rt := nextRebootTime(guestNow.Time, secondsToDuration(guestUptime), t.Status.LastRebootTime); rt != nil {
 						t.Status.LastRebootTime = rt
 						changed = true
 					}
