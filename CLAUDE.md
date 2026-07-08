@@ -37,9 +37,20 @@ make build-installer IMG=<image>
 # Release packaging — Helm chart (regenerate after CRD/manifest changes)
 # Requires: go install github.com/arttor/helmify/cmd/helmify@latest
 # Chart lives in charts/vrouter-operator/; run helm lint before committing
-# CAUTION: some templates carry manual fixes helmify does not generate
-# (Service-name trunc-63 guards, webhookServiceName helper, manager env list —
-# marked with NOTE comments); re-apply/verify them after regenerating
+# CAUTION: the chart carries manual fixes helmify does not generate. Templates
+# are intentionally comment-free, so this list is the only record — re-apply
+# and verify each item after regenerating:
+#   - deployment.yaml, metrics-service.yaml, webhook-service.yaml: no hardcoded
+#     app.kubernetes.io/name in selectors / pod template labels; helmify emits
+#     it alongside selectorLabels (arttor/helmify#196) and the duplicate key is
+#     rejected by Flux/ArgoCD strict YAML parsers
+#   - metrics-service.yaml: Service name shortened from the generated
+#     "-controller-manager-metrics-service" suffix and wrapped with
+#     trunc 63/trimSuffix to respect the 63-char Service name limit
+#   - webhook-service.yaml (and every template referencing it): name via the
+#     vrouter-operator.webhookServiceName helper in _helpers.tpl (trunc-63 guard)
+#   - values.yaml + deployment.yaml: manager `env` list so operators can set
+#     e.g. ENABLE_WEBHOOKS=false (helmify does not generate it)
 bin/kustomize build config/default | helmify charts/vrouter-operator
 helm package charts/vrouter-operator  # → vrouter-operator-<version>.tgz
 ```

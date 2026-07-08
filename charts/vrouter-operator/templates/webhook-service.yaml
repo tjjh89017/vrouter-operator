@@ -1,18 +1,12 @@
 apiVersion: v1
 kind: Service
 metadata:
-  # NOTE: name uses the vrouter-operator.webhookServiceName helper (guards the
-  # Kubernetes 63-char Service name limit for long release names). Other
-  # templates that reference this Service must use the same helper. If this
-  # chart is regenerated via `kustomize build config/default | helmify ...`,
-  # re-apply this fix.
   name: {{ include "vrouter-operator.webhookServiceName" . }}
   labels:
   {{- include "vrouter-operator.labels" . | nindent 4 }}
 spec:
   type: {{ .Values.webhookService.type }}
   selector:
-    app.kubernetes.io/name: vrouter-operator
     control-plane: controller-manager
     {{- include "vrouter-operator.selectorLabels" . | nindent 4 }}
   ports:

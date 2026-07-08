@@ -1,10 +1,6 @@
 apiVersion: v1
 kind: Service
 metadata:
-  # NOTE: manually shortened from the helmify-generated
-  # "-controller-manager-metrics-service" suffix and wrapped with trunc/trimSuffix
-  # to stay within the Kubernetes 63-char Service name limit. If this chart is
-  # regenerated via `kustomize build config/default | helmify ...`, re-apply this fix.
   name: {{ printf "%s-metrics-service" (include "vrouter-operator.fullname" .) | trunc 63 | trimSuffix "-" }}
   labels:
     control-plane: controller-manager
@@ -12,7 +8,6 @@ metadata:
 spec:
   type: {{ .Values.metricsService.type }}
   selector:
-    app.kubernetes.io/name: vrouter-operator
     control-plane: controller-manager
     {{- include "vrouter-operator.selectorLabels" . | nindent 4 }}
   ports:
