@@ -101,8 +101,18 @@ func (r *VRouterBindingReconciler) onDelete(ctx context.Context, _ ctrl.Request,
 	return ctrl.Result{}, r.Update(ctx, binding)
 }
 
-// setReadyCondition patches the Ready condition on the binding status.
-func (r *VRouterBindingReconciler) setReadyCondition(ctx context.Context, binding *vrouterv1.VRouterBinding, status metav1.ConditionStatus, reason, message string) {
+// setReadyCondition patches the Ready condition on the binding status. It
+// returns the patch error (matching stampRolloutFrontier's convention)
+// rather than swallowing it: a caller on a terminal path with no other
+// scheduled requeue (a rollout-completion True, for instance) must propagate
+// this error so controller-runtime retries with backoff -- otherwise a
+// transient patch failure (409 conflict, apiserver hiccup) leaves Ready
+// stuck False/RolloutInProgress forever despite the rollout having actually
+// completed. Callers that already have a more specific error to return (the
+// ReconcileError paths) should ignore this one rather than mask it; callers
+// paired with an explicit RequeueAfter may also ignore it since the
+// scheduled requeue re-attempts regardless.
+func (r *VRouterBindingReconciler) setReadyCondition(ctx context.Context, binding *vrouterv1.VRouterBinding, status metav1.ConditionStatus, reason, message string) error {
 	patch := client.MergeFrom(binding.DeepCopy())
 	meta.SetStatusCondition(&binding.Status.Conditions, metav1.Condition{
 		Type:               vrouterv1.ConditionReady,
@@ -111,9 +121,7 @@ func (r *VRouterBindingReconciler) setReadyCondition(ctx context.Context, bindin
 		Message:            message,
 		ObservedGeneration: binding.Generation,
 	})
-	if err := r.Status().Patch(ctx, binding, patch); err != nil {
-		logf.FromContext(ctx).Error(err, "failed to patch binding status")
-	}
+	return r.Status().Patch(ctx, binding, patch)
 }
 
 // effectiveTemplateRefs returns the merged template ref list: templateRef (if set) prepended to templateRefs.
@@ -528,7 +536,9 @@ func (r *VRouterBindingReconciler) runRollout(ctx context.Context, binding *vrou
 			// Failed has no auto-retry, so this never re-dispatches the failed
 			// apply itself.
 			message := fmt.Sprintf("VRouterConfig %q is Failed", failed.Name)
-			r.setReadyCondition(ctx, binding, metav1.ConditionFalse, ReasonRolloutHalted, message)
+			// Patch error ignored: the scheduled RequeueAfter below re-attempts
+			// this same Ready write on the next poll regardless.
+			_ = r.setReadyCondition(ctx, binding, metav1.ConditionFalse, ReasonRolloutHalted, message)
 			return ctrl.Result{RequeueAfter: binding.Spec.Rollout.PollInterval.Duration}, nil
 		}
 	}
@@ -587,15 +597,25 @@ func (r *VRouterBindingReconciler) runRollout(ctx context.Context, binding *vrou
 			return ctrl.Result{}, err
 		}
 		if notApplied != nil {
-			r.setReadyCondition(ctx, binding, metav1.ConditionFalse, ReasonRolloutInProgress, "waiting for all configs Applied")
+			// Patch error ignored: the scheduled RequeueAfter below re-attempts
+			// this same Ready write on the next poll regardless.
+			_ = r.setReadyCondition(ctx, binding, metav1.ConditionFalse, ReasonRolloutInProgress, "waiting for all configs Applied")
 			return ctrl.Result{RequeueAfter: binding.Spec.Rollout.PollInterval.Duration}, nil
 		}
+		// Terminal path with no other scheduled requeue: propagate a failed
+		// patch so controller-runtime retries with backoff, instead of
+		// reporting a completed rollout that never actually reached Ready=True.
 		message := fmt.Sprintf("All %d VRouterConfigs applied.", len(desired))
-		r.setReadyCondition(ctx, binding, metav1.ConditionTrue, "ReconcileSucceeded", message)
+		if err := r.setReadyCondition(ctx, binding, metav1.ConditionTrue, "ReconcileSucceeded", message); err != nil {
+			return ctrl.Result{}, err
+		}
 		return ctrl.Result{}, nil
 	}
 
-	r.setReadyCondition(ctx, binding, metav1.ConditionTrue, "ReconcileSucceeded", "All VRouterConfigs reconciled successfully.")
+	// Terminal path with no other scheduled requeue: same rationale as above.
+	if err := r.setReadyCondition(ctx, binding, metav1.ConditionTrue, "ReconcileSucceeded", "All VRouterConfigs reconciled successfully."); err != nil {
+		return ctrl.Result{}, err
+	}
 	return ctrl.Result{}, nil
 }
 
@@ -607,12 +627,14 @@ func (r *VRouterBindingReconciler) onChange(ctx context.Context, _ ctrl.Request,
 	// (the universal write gate then preserves the stagger across renders).
 	desired, err := r.renderAll(ctx, binding)
 	if err != nil {
-		r.setReadyCondition(ctx, binding, metav1.ConditionFalse, "ReconcileError", err.Error())
+		// The render error, not a status patch failure, is the real cause:
+		// return it unmasked even if the Ready-condition patch also fails.
+		_ = r.setReadyCondition(ctx, binding, metav1.ConditionFalse, "ReconcileError", err.Error())
 		return ctrl.Result{}, err
 	}
 
 	if err := r.cleanupOrphans(ctx, binding, desired); err != nil {
-		r.setReadyCondition(ctx, binding, metav1.ConditionFalse, "ReconcileError", err.Error())
+		_ = r.setReadyCondition(ctx, binding, metav1.ConditionFalse, "ReconcileError", err.Error())
 		return ctrl.Result{}, err
 	}
 
@@ -625,11 +647,17 @@ func (r *VRouterBindingReconciler) onChange(ctx context.Context, _ ctrl.Request,
 	}
 
 	if err := r.createOrUpdateAll(ctx, binding, desired); err != nil {
-		r.setReadyCondition(ctx, binding, metav1.ConditionFalse, "ReconcileError", err.Error())
+		_ = r.setReadyCondition(ctx, binding, metav1.ConditionFalse, "ReconcileError", err.Error())
 		return ctrl.Result{}, err
 	}
 
-	r.setReadyCondition(ctx, binding, metav1.ConditionTrue, "ReconcileSucceeded", "All VRouterConfigs reconciled successfully.")
+	// Terminal path with no other scheduled requeue (mode: Disabled writes
+	// everything in one pass, same as the rollout walk's completion above):
+	// propagate a failed patch instead of reporting success with the write
+	// lost.
+	if err := r.setReadyCondition(ctx, binding, metav1.ConditionTrue, "ReconcileSucceeded", "All VRouterConfigs reconciled successfully."); err != nil {
+		return ctrl.Result{}, err
+	}
 	return ctrl.Result{}, nil
 }
 
