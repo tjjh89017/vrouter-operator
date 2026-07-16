@@ -70,6 +70,26 @@ webhooks:
     service:
       name: webhook-service
       namespace: system
+      path: /mutate-vrouter-kojuro-date-v1-vrouterparams
+  failurePolicy: Fail
+  name: mvrouterparams-v1.kb.io
+  rules:
+  - apiGroups:
+    - vrouter.kojuro.date
+    apiVersions:
+    - v1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - vrouterparams
+  sideEffects: None
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
       path: /mutate-vrouter-kojuro-date-v1-vroutertarget
   failurePolicy: Fail
   name: mvroutertarget-v1.kb.io
@@ -169,6 +189,27 @@ webhooks:
     - UPDATE
     resources:
     - vrouterconfigs
+  sideEffects: None
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
+      path: /validate-vrouter-kojuro-date-v1-vrouterparams
+  failurePolicy: Fail
+  name: vvrouterparams-v1.kb.io
+  rules:
+  - apiGroups:
+    - vrouter.kojuro.date
+    apiVersions:
+    - v1
+    operations:
+    - CREATE
+    - UPDATE
+    - DELETE
+    resources:
+    - vrouterparams
   sideEffects: None
 - admissionReviewVersions:
   - v1
