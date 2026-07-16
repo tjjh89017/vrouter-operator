@@ -35,6 +35,7 @@ rules:
   - proxmoxclusters
   - vrouterbindings
   - vrouterconfigs
+  - vrouterparams
   - vroutertargets
   - vroutertemplates
   verbs:
