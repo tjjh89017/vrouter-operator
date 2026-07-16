@@ -96,7 +96,7 @@ See `docs/SPEC.md §7` for full reconcile flows and the internal vbash script te
 
 All controllers follow the same pattern in `Reconcile()`: check `DeletionTimestamp` → `onDelete`; ensure finalizer → `onChange`. Both helpers have signature `(ctx, req, obj) (Result, error)`.
 
-- **BindingController**: `onDelete` removes finalizer (ownerRef cascade handles VRouterConfig GC). `onChange` resolves targets, merges params, renders templates, creates/updates VRouterConfigs, cleans orphans.
+- **BindingController**: `onDelete` removes finalizer (ownerRef cascade handles VRouterConfig GC). `onChange` resolves paramsRefs and targets, merges params (`paramsRefs` in list order → `binding.params` → `target.params`, later layers override), renders templates, creates/updates VRouterConfigs, cleans orphans. Watches VRouterTemplate/VRouterTarget/VRouterParams and maps events to referencing bindings.
 - **VRouterController**: `onChange` runs CheckReady → generation-based apply → poll execPID. `phase` is display-only; `observedGeneration`+`execPID` drive control flow. `Applied` condition enables `kubectl wait`. Failed has no auto-retry.
 
 ### Webhooks
