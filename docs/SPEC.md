@@ -207,11 +207,20 @@ spec:
   targetRefs:
     - name: site-a-routers
     - name: site-b-routers
+  rollout:                  # optional; absent/empty/unset mode = Disabled (today's write-all-at-once behavior)
+    mode: WaitForApplied    # Disabled (default) | WaitForApplied | FixedInterval — see §7.1
+    pollInterval: 10s
+    waitAfterApplied: 60s
+status:
+  rollout:                  # serial rollout frontier, maintained by BindingController; only
+    lastUpdatedTarget: site-a-routers   # meaningful when spec.rollout.mode is not Disabled
+    lastUpdateTime: "2026-07-16T00:00:00Z"
 ```
 
 > **Backward compatibility**: The deprecated `templateRef` field (singular, optional) is still accepted. If set, it is prepended to `templateRefs` as the highest-priority (first) template.
 
 - `paramsRefs` is an ordered, optional list of `VRouterParams` objects (§3.6) to merge as the lowest-priority params layer: later entries override earlier ones, and the fully-merged `paramsRefs` result is itself overridden by this binding's own `params`, which in turn is overridden by the target's `params` (§4.1). An empty or absent `paramsRefs` list is valid and simply contributes no extra layer.
+- `rollout` optionally staggers binding-driven `VRouterConfig` writes across `targetRefs` instead of writing all of them in the same reconcile — see §7.1 "Rollout modes" for the full serial-walk model, and §9.3 for the Go types.
 
 **Same-namespace-only references**: every entry in `templateRef`, `templateRefs`, `paramsRefs`, and `targetRefs` must resolve to an object in the VRouterBinding's own namespace. A `namespace` field left empty defaults to the binding's namespace (as usual); a `namespace` field set to any *other* namespace is rejected by the validating webhook. See §6.2 for the full policy.
 
@@ -419,7 +428,7 @@ Performs cross-field validation and reference checks that kubebuilder JSON schem
 |----------|------------|
 | VRouterTarget | `provider.kubevirt` (with non-empty `name`) must be set when `type=kubevirt`; `provider.proxmox` must be set when `type=proxmox`; `provider.daemon` (with non-empty `address` and `agentID`) must be set when `type=vrouter-daemon`; for Proxmox, `clusterRef.name` is mandatory and `clusterRef.namespace`, if set, must equal the VRouterTarget's own namespace (cross-namespace references are rejected). On **delete**, rejected if any VRouterBinding's `targetRefs` or any VRouterConfig's `targetRef` in the same namespace still resolves to this VRouterTarget (error names one referencing object and, if more exist, how many others) — VRouterTarget and VRouterParams (below) are the only two CRDs in this table whose webhooks register the `delete` verb. This check fails closed: a `List` error on either kind blocks the deletion rather than letting it through, and a referencing object that is itself already terminating (non-nil `deletionTimestamp`) still counts as a blocker until its own finalizer is removed |
 | VRouterConfig | `spec.targetRef` must resolve to an existing VRouterTarget; `spec.targetRef.namespace`, if set, must equal the VRouterConfig's own namespace (cross-namespace references are rejected). VRouterConfig does **not** carry its own `provider` block, so there is no provider cross-field validation here — only the targetRef checks above. |
-| VRouterBinding | `spec.targetRefs` must not be empty; at least one of `spec.templateRef` (deprecated) or `spec.templateRefs` must be set; every entry in `spec.templateRef`, `spec.templateRefs[]`, `spec.paramsRefs[]`, and `spec.targetRefs[]` must resolve to an existing object, and each entry's `namespace`, if set, must equal the VRouterBinding's own namespace (cross-namespace references are rejected); `spec.paramsRefs` is optional — an empty or absent list is valid and simply skips this check |
+| VRouterBinding | `spec.targetRefs` must not be empty; at least one of `spec.templateRef` (deprecated) or `spec.templateRefs` must be set; every entry in `spec.templateRef`, `spec.templateRefs[]`, `spec.paramsRefs[]`, and `spec.targetRefs[]` must resolve to an existing object, and each entry's `namespace`, if set, must equal the VRouterBinding's own namespace (cross-namespace references are rejected); `spec.paramsRefs` is optional — an empty or absent list is valid and simply skips this check. `spec.rollout` (§7.1): a nil `rollout`, an empty `rollout: {}`, or an explicit `mode: Disabled` skip every check below entirely — an otherwise-invalid Disabled rollout must never block a create/update. Only the fields belonging to the *selected* mode are checked; fields belonging to the other mode are ignored regardless of their value. `mode: FixedInterval` requires `waitInterval` greater than zero; `mode: WaitForApplied` requires `pollInterval` and `waitAfterApplied` to not be negative (both default and are otherwise unconstrained) |
 | VRouterTemplate | `spec.config` and `spec.commands`, when set, must each parse as valid Go `text/template` syntax (parsed with the same sprig FuncMap used at render time — see §5.1); a syntax error is rejected at admission instead of surfacing later as a render failure |
 | ProxmoxCluster | `spec.endpoints` must be non-empty, and no entry may be an empty string; `spec.syncInterval` must be greater than zero; `spec.credentialsRef.name` must be non-empty |
 | VRouterParams | `ValidateCreate`/`ValidateUpdate` are no-ops — the schemaless `params` block has no cross-field constraints to check. On **delete**, rejected if any VRouterBinding's `spec.paramsRefs` in the same namespace still resolves to this VRouterParams (error names one referencing binding and, if more exist, how many others); unlike VRouterTarget, no other CRD references a VRouterParams, so only bindings are checked. This check fails closed the same way as VRouterTarget's delete check above (a `List` error blocks the deletion) |
@@ -465,21 +474,18 @@ else:
 
 **reconcileNormal (onChange)**:
 
-1. Resolve effective template list via `effectiveTemplateRefs()` (deprecated `templateRef` prepended to `templateRefs`)
-2. Lookup each template → get VRouterTemplate
-3. Lookup each `paramsRefs` entry, in list order → get VRouterParams (optional; an empty or absent list is valid and contributes no extra params layer)
-4. Lookup each `targetRef` → get VRouterTarget
-5. Merge params: `paramsRefs` (in list order) → `binding.params` → `target.params` (highest priority), via `MergeParamsLayers` (§4.1/§4.2)
-6. Render and concatenate config/commands from templates in order
-7. Create/update VRouterConfig with:
-   - `ownerReference` → binding (for cascade delete via K8s GC)
-   - `vrouter.kojuro.date/binding` label → binding name (for listing)
-   - `vrouter.kojuro.date/target` label → target name (for listing)
-   - `targetRef` set to the VRouterTarget name
-8. **Orphan cleanup**: list existing VRouterConfigs by label `vrouter.kojuro.date/binding={name}`, diff against desired set, delete orphans
-9. **Update status condition**: always update `Ready` condition before returning
-   - success → `Ready=True`, reason=`ReconcileSucceeded`
-   - any error → `Ready=False`, reason=`ReconcileError`, message=error string
+1. **Render** (`renderAll`): resolve the desired VRouterConfig spec for **every** target first, in `targetRefs` order, before any writes happen:
+   - Resolve effective template list via `effectiveTemplateRefs()` (deprecated `templateRef` prepended to `templateRefs`)
+   - Lookup each template → get VRouterTemplate
+   - Lookup each `paramsRefs` entry, in list order → get VRouterParams (optional; an empty or absent list is valid and contributes no extra params layer)
+   - Lookup each `targetRef` → get VRouterTarget
+   - Merge params: `paramsRefs` (in list order) → `binding.params` → `target.params` (highest priority), via `MergeParamsLayers` (§4.1/§4.2)
+   - Render and concatenate config/commands from templates in order
+   - Each desired config carries: `ownerReference` → binding (for cascade delete via K8s GC), `vrouter.kojuro.date/binding` label → binding name, `vrouter.kojuro.date/target` label → target name, `targetRef` set to the VRouterTarget name
+2. **Orphan cleanup** (`cleanupOrphans`): list existing VRouterConfigs by label `vrouter.kojuro.date/binding={name}`, diff against the desired set from step 1, delete orphans. Runs every reconcile, regardless of rollout mode or progress — deleting a VRouterConfig only removes the K8s object (its `onDelete` just drops the finalizer) and never triggers a commit on the router, so this is always safe mid-rollout.
+3. **Mode dispatch** on `spec.rollout.mode` (`Disabled` is the zero value: an absent `rollout`, an empty `rollout: {}`, or an unset `mode` are all equivalent):
+   - `mode: Disabled` — create/update every desired VRouterConfig in this single reconcile (today's pre-rollout behavior; this is the only mode that ever writes more than one config per reconcile). Then: success → `Ready=True`, reason=`ReconcileSucceeded`; any error → `Ready=False`, reason=`ReconcileError`, message=error string.
+   - `mode: FixedInterval` / `mode: WaitForApplied` — hand off to the shared **rollout walk** (`runRollout`), described in "Rollout modes" below. The walk writes at most one VRouterConfig per reconcile and always ends by requeuing or completing; it never falls through to the Disabled write-all path.
 
 > **Note on ownerReference**: Uses `controllerutil.SetControllerReference()` with `blockOwnerDeletion: true`. This ensures the binding stays in "Deleting" state (foreground delete) until all dependent VRouterConfigs are cleaned up, making it easier to debug deletion order and verify cleanup completion.
 
@@ -492,11 +498,87 @@ controllerutil.RemoveFinalizer(binding, FinalizerName)
 return ctrl.Result{}, r.Update(ctx, binding)
 ```
 
+#### Rollout modes (spec.rollout)
+
+An opt-in mechanism that staggers binding-driven `VRouterConfig` writes across `targetRefs`, one target at a time, instead of writing every generated config in the same reconcile. The invariant it establishes: **at any moment, at most one target's VRouterConfig is being written by the binding controller.**
+
+```yaml
+spec:
+  rollout:
+    mode: WaitForApplied        # Disabled (default) | WaitForApplied | FixedInterval
+    pollInterval: 10s           # WaitForApplied: requeue interval while polling for Applied (default 10s)
+    waitAfterApplied: 60s       # WaitForApplied: soak period after Applied before advancing (default 0s)
+    waitInterval: 60s           # FixedInterval: fixed wait after each write; required (>0) for this mode
+status:
+  rollout:
+    lastUpdatedTarget: site-a-routers
+    lastUpdateTime: "2026-07-16T00:00:00Z"
+```
+
+- **`Disabled`** (the default) is the zero value: an absent `rollout`, an empty `rollout: {}`, or an unset `mode` are all equivalent and preserve pre-rollout behavior — no gating logic runs at all.
+- **`FixedInterval`**: pure time-based stagger. Writes a target, waits `waitInterval`, writes the next — Applied/Failed status is ignored entirely, by definition (a Failed target does not stop this mode's rollout).
+- **`WaitForApplied`**: writes a target, then waits until its generated VRouterConfig reaches `Applied` **for the current generation** (§7.2's `Applied` condition, checked via `ObservedGeneration` so a stale `True` left over from before a re-render doesn't count), polling every `pollInterval`; once Applied, an additional `waitAfterApplied` soak (measured from the `Applied` condition's own `lastTransitionTime`, not the frontier stamp, so a slow apply doesn't shortchange the soak) elapses before advancing to the next target. Halts on any `Failed` generated config — see "Error handling" below.
+
+**The serial walk ("update only the first mismatch per reconcile")**: every reconcile re-renders all targets and walks them in `targetRefs` order, comparing each desired spec against its existing generated VRouterConfig:
+
+1. The first target whose desired spec differs from its existing VRouterConfig (or whose VRouterConfig doesn't exist yet) is the **first mismatch**. Before writing it, the **universal write gate** (below) must be satisfied. The walk then **stamps the frontier before writing** (write-ahead): `status.rollout` is set to `{lastUpdatedTarget: <target>, lastUpdateTime: now}` and `Ready` is set to `False`/`RolloutInProgress` (message e.g. `2/5 targets updated`) in one status update, then — and only then — the VRouterConfig is created/updated. The reconcile returns a requeue without touching any other target.
+2. A target whose spec already matches and which is not the current frontier is skipped (it either never needed an update or completed earlier in the walk) — the walk advances.
+3. A target whose spec matches **and** is the current frontier (`status.rollout.lastUpdatedTarget`) is the one the mode-specific wait applies to: the walk requeues until the wait has elapsed (poll/soak for WaitForApplied, `waitInterval` measured from `status.rollout.lastUpdateTime` for FixedInterval), then advances past it.
+4. If the walk reaches the end with no mismatch and the frontier's wait has elapsed, the rollout is finished for this render: `status.rollout` is left in place (a stale frontier is harmless — its wait has already elapsed) rather than cleared.
+
+**Write-ahead stamping** is what makes the walk resumable and crash-safe: the stamp and the config write are two separate API calls (one status update, one spec write) that cannot be made atomic, so the stamp always goes out first. If the process crashes between them, the config spec is still mismatched on the next reconcile, so the walk re-detects the same first mismatch, re-stamps (refreshing the interval's start time), and retries — there is never a state where a config was updated but unrecorded, and the guaranteed gap between writes never shrinks.
+
+**Universal write gate**: the same wait that gates advancing past the frontier also gates the **first write of every render**, not just the walk's own in-progress advance — a re-render arriving mid-rollout must not let its first write overlap with the still-in-flight previous frontier's commit (exactly the invariant rollout exists to enforce), and in FixedInterval mode skipping the gate could undershoot `waitInterval` between two consecutive writes. Concretely, before writing any first-mismatch target that is **not** the current frontier, the same wait computed for the frontier is applied. Two special cases:
+   - **First mismatch IS the frontier itself** (the render changed while that target was still being waited on) → written immediately, no wait — single-router commits are already serialized by the VRouterConfig controller's `execPID` handling (§7.2).
+   - **No frontier recorded** (`status.rollout` empty — first rollout ever) → gate passes immediately.
+
+**Frontier evicted from `targetRefs`**: if the recorded frontier target is no longer in `spec.targetRefs` (removed mid-rollout), the gate **degrades to a pure time gate**: wait until `lastUpdateTime + waitAfterApplied` (WaitForApplied) / `+ waitInterval` (FixedInterval), then pass — never health-gate a target the user just evicted, since it is often removed precisely because it is dead, and waiting on its `Applied` would deadlock on a corpse. The time gate is still enforced so an overlapping commit isn't created; it depends only on `status.rollout`, not on the (possibly already orphan-deleted) VRouterConfig object itself.
+
+**Re-render mid-rollout needs no explicit restart**: because every reconcile re-renders and walks from the top, a spec change during a rollout implicitly restarts it — the first target whose config differs from the *new* desired spec becomes the new frontier (which may be the very first target again, for a change affecting everyone), while targets already matching the new render are left untouched. Combined with the universal write gate above, this preserves the stagger guarantee across the transition between the old and new render.
+
+**Error handling and halt (WaitForApplied only)**: if **any** generated VRouterConfig belonging to the binding is `Failed` — checked across every desired target, not only the current frontier, so a target that completed earlier and later flips to `Failed` (e.g. a reboot-forced re-apply gone wrong) halts the rollout the moment the walk sees it — the walk **halts**:
+
+- No further targets are written; all remaining targets keep their previous, known-working config.
+- The reconcile requeues at `pollInterval` purely to **observe** recovery — it never re-dispatches the failed apply itself (config-level `Failed` has no auto-retry, per §7.2's "Key semantics").
+- `Ready` is set to `False`, reason=`RolloutHalted`, message names the failed VRouterConfig (e.g. `VRouterConfig "mybinding.site-a-routers" is Failed`).
+
+The halt is **not terminal**: it is re-evaluated fresh every reconcile, so it clears — and the very next reconcile proceeds normally — the moment either:
+- the failed config recovers to `Applied` **for its current generation** (out-of-band fix, or a reboot-forced re-apply that succeeds this time), or
+- a new render **changes the failed config's own spec** — this makes it a first-mismatch target again, and since it is also still the current frontier, the universal write gate's "first mismatch IS the frontier" rule lets it be overwritten immediately, with no wait.
+
+Precisely **not** a resume path: a new render that changes only *other* targets' specs. The halting config's own desired spec is unchanged, so the halt check still finds it `Failed` with a matching spec and keeps the entire walk halted — no target is written, not even the other target whose spec did change. To make progress, fix the failed target itself, or remove it from `targetRefs`.
+
+**Stuck-but-not-Failed** targets (e.g. VM stopped, so the apply is skipped and the config stays `Pending` forever) block the rollout indefinitely via the normal frontier wait (never `Failed`, so the any-Failed halt never triggers; never `Applied`, so the frontier wait never elapses) — deliberately, since proceeding past an unverified target defeats the mode's purpose. An in-flight apply that never completes is already bounded by the VRouterConfig-level apply timeout (§7.2), which eventually flips it to `Failed` and triggers the halt above instead.
+
+**`Ready` as a fleet-level completion gate (WaitForApplied only)**: for this mode, `Ready` changes meaning from "configs were written" to "the rollout completed":
+
+| Rollout state | Ready |
+|---|---|
+| in progress (from the first write until completion) | `False`, reason=`RolloutInProgress`, message reports progress (e.g. `2/5 targets updated`, or `waiting for all configs Applied` during the final completion check) |
+| halted on a Failed config | `False`, reason=`RolloutHalted`, message names the failed VRouterConfig |
+| completed: every generated config `Applied` for its current generation | `True`, reason=`ReconcileSucceeded` |
+
+```bash
+kubectl wait --for=condition=Ready vrouterbinding/mybinding --timeout=10m
+```
+
+now means "every router in this binding has successfully applied the current config" — the explicit `RolloutInProgress` False state during the walk is what makes this sound: without it, a stale `True` left over from the previous render would let `kubectl wait` return immediately.
+
+The completion check (walk finished with no mismatch and the frontier's wait elapsed) additionally verifies **every** desired target's generated config is `Applied` for its current generation before setting `Ready=True` — not just the frontier the walk just finished waiting on. This is a **final consistency check**, not the primary failure-detection path: the any-Failed halt above already covers the common case; this additionally catches e.g. a target that is `Pending` (never `Applied`, never `Failed`) even though the frontier itself is `Applied`.
+
+This evaluation happens at reconcile time, not continuously — after completion, a router that breaks later only flips `Ready` back to `False` once something triggers another reconcile. There is no `Owns(&VRouterConfig{})` watch wired up today to make this near-real-time; the controller's watches are limited to VRouterBinding/VRouterTarget/VRouterTemplate/VRouterParams (see the table at the top of this section).
+
+**`FixedInterval` deliberately does not get this property**: because it ignores Applied/Failed by design, its `Ready=True` only means the staggered writes finished — it says nothing about whether any router actually applied its config successfully. `mode: Disabled` keeps the pre-rollout `Ready` semantics unchanged (success = all configs written this reconcile).
+
 **Condition (for `kubectl wait`):**
 
 | Condition type | Status=True | Status=False |
 |----------------|-------------|--------------|
-| `Ready` | all VRouterConfigs reconciled successfully | any reconcile error |
+| `Ready` (mode `Disabled`) | all VRouterConfigs reconciled successfully | any reconcile error |
+| `Ready` (mode `FixedInterval`) | the staggered writes for the current render finished (no health check) | rollout in progress (reason=`RolloutInProgress`), or a render/orphan-cleanup error (reason=`ReconcileError`) |
+| `Ready` (mode `WaitForApplied`) | every generated VRouterConfig is `Applied` for its current generation | rollout in progress (reason=`RolloutInProgress`), halted on a Failed config (reason=`RolloutHalted`), or a render/orphan-cleanup error (reason=`ReconcileError`) |
+
+> `ReconcileError` is only set for a `renderAll`/`cleanupOrphans` failure, both of which happen before the mode dispatch. An error from *inside* the rollout walk itself (e.g. a failed get/write of a generated VRouterConfig) is returned as a plain reconcile error — triggering controller-runtime's default requeue-with-backoff — without touching the `Ready` condition, which is left at whatever it was last set to (typically `RolloutInProgress` or `RolloutHalted` from a previous successful reconcile).
 
 ```bash
 kubectl wait --for=condition=Ready vrouterbinding/mybinding --timeout=60s
@@ -932,13 +1014,60 @@ type VRouterBindingSpec struct {
     // +kubebuilder:validation:Schemaless
     // +optional
     Params apiextensionsv1.JSON `json:"params,omitempty"`
+    // Rollout controls whether binding-driven VRouterConfig updates across
+    // TargetRefs are staggered instead of all written in the same reconcile.
+    // Absent (nil) is equivalent to RolloutModeDisabled. See §7.1.
+    // +optional
+    Rollout *RolloutSpec `json:"rollout,omitempty"`
 }
+
+// Rollout mode enum values for RolloutSpec.Mode.
+const (
+    RolloutModeDisabled       = "Disabled"
+    RolloutModeWaitForApplied = "WaitForApplied"
+    RolloutModeFixedInterval  = "FixedInterval"
+)
+
+type RolloutSpec struct {
+    // +kubebuilder:validation:Enum=Disabled;WaitForApplied;FixedInterval
+    // +kubebuilder:default=Disabled
+    // +optional
+    Mode string `json:"mode,omitempty"`
+    // Used by mode WaitForApplied.
+    // +kubebuilder:default="10s"
+    // +optional
+    PollInterval metav1.Duration `json:"pollInterval,omitempty"`
+    // Used by mode WaitForApplied.
+    // +kubebuilder:default="0s"
+    // +optional
+    WaitAfterApplied metav1.Duration `json:"waitAfterApplied,omitempty"`
+    // Used by mode FixedInterval; required (> 0) when that mode is selected.
+    // +optional
+    WaitInterval metav1.Duration `json:"waitInterval,omitempty"`
+}
+
+// EffectiveMode returns RolloutModeDisabled for a nil RolloutSpec or an empty Mode field.
+func (r *RolloutSpec) EffectiveMode() string { ... }
 
 type VRouterBindingStatus struct {
     // +optional
     Conditions []metav1.Condition `json:"conditions,omitempty"`
+    // Rollout records the serial rollout frontier: the last target whose
+    // generated VRouterConfig was written by the rollout walk, and when.
+    // Only meaningful when spec.rollout.mode is not Disabled.
+    // +optional
+    Rollout *RolloutStatus `json:"rollout,omitempty"`
+}
+
+type RolloutStatus struct {
+    // +optional
+    LastUpdatedTarget string `json:"lastUpdatedTarget,omitempty"`
+    // +optional
+    LastUpdateTime metav1.Time `json:"lastUpdateTime,omitempty"`
 }
 ```
+
+`RolloutSpec`/`RolloutStatus` and the rollout walk that consumes them are documented in full in §7.1 "Rollout modes".
 
 ### 9.4 VRouterConfig
 
