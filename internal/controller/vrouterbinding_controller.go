@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"strings"
 
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -46,6 +47,7 @@ type VRouterBindingReconciler struct {
 // +kubebuilder:rbac:groups=vrouter.kojuro.date,resources=vrouterbindings/finalizers,verbs=update
 // +kubebuilder:rbac:groups=vrouter.kojuro.date,resources=vroutertemplates,verbs=get;list;watch
 // +kubebuilder:rbac:groups=vrouter.kojuro.date,resources=vroutertargets,verbs=get;list;watch
+// +kubebuilder:rbac:groups=vrouter.kojuro.date,resources=vrouterparams,verbs=get;list;watch
 // +kubebuilder:rbac:groups=vrouter.kojuro.date,resources=vrouterconfigs,verbs=get;list;watch;create;update;patch;delete
 
 func (r *VRouterBindingReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -116,6 +118,20 @@ func (r *VRouterBindingReconciler) onChange(ctx context.Context, _ ctrl.Request,
 		templates = append(templates, tmpl)
 	}
 
+	// Step 1b: fetch all VRouterParams in order (paramsRefs, lowest-priority
+	// params layer; see MergeParamsLayers below).
+	paramsRefsJSON := make([]apiextensionsv1.JSON, 0, len(binding.Spec.ParamsRefs))
+	for _, ref := range binding.Spec.ParamsRefs {
+		var params vrouterv1.VRouterParams
+		ns := vrouterv1.ResolveNamespace(ref, binding.Namespace)
+		if err := r.Get(ctx, client.ObjectKey{Name: ref.Name, Namespace: ns}, &params); err != nil {
+			err = fmt.Errorf("get params %q (namespace %q): %w", ref.Name, ns, err)
+			r.setReadyCondition(ctx, binding, metav1.ConditionFalse, "ReconcileError", err.Error())
+			return ctrl.Result{}, err
+		}
+		paramsRefsJSON = append(paramsRefsJSON, params.Spec.Params)
+	}
+
 	// Step 2: resolve targets, render and reconcile one VRouterConfig per target.
 	desired := make(map[string]bool, len(binding.Spec.TargetRefs))
 	for _, ref := range binding.Spec.TargetRefs {
@@ -127,8 +143,12 @@ func (r *VRouterBindingReconciler) onChange(ctx context.Context, _ ctrl.Request,
 			return ctrl.Result{}, err
 		}
 
-		// Step 3: merge params — binding (base) overridden by target.
-		params, err := vrotemplate.MergeParams(binding.Spec.Params, target.Spec.Params)
+		// Step 3: merge params — paramsRefs (list order) overridden by
+		// binding.Params, overridden by target.Params (highest priority).
+		paramsLayers := make([]apiextensionsv1.JSON, 0, len(paramsRefsJSON)+2)
+		paramsLayers = append(paramsLayers, paramsRefsJSON...)
+		paramsLayers = append(paramsLayers, binding.Spec.Params, target.Spec.Params)
+		params, err := vrotemplate.MergeParamsLayers(paramsLayers...)
 		if err != nil {
 			err = fmt.Errorf("merge params for target %q: %w", ref.Name, err)
 			r.setReadyCondition(ctx, binding, metav1.ConditionFalse, "ReconcileError", err.Error())
