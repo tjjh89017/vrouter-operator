@@ -50,12 +50,6 @@ app.kubernetes.io/name: {{ include "vrouter-operator.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
 
-{{/*
-Create the name of the webhook Service.
-Kubernetes Service names are limited to 63 chars (RFC 1035 label), so this is
-wrapped with trunc/trimSuffix as a guard for long release names. Manually
-added — re-apply if this chart is regenerated via helmify.
-*/}}
 {{- define "vrouter-operator.webhookServiceName" -}}
 {{- printf "%s-webhook-service" (include "vrouter-operator.fullname" .) | trunc 63 | trimSuffix "-" }}
 {{- end }}
