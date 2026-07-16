@@ -73,6 +73,26 @@ webhooks:
     service:
       name: '{{ include "vrouter-operator.webhookServiceName" . }}'
       namespace: '{{ .Release.Namespace }}'
+      path: /mutate-vrouter-kojuro-date-v1-vrouterparams
+  failurePolicy: Fail
+  name: mvrouterparams-v1.kb.io
+  rules:
+  - apiGroups:
+    - vrouter.kojuro.date
+    apiVersions:
+    - v1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - vrouterparams
+  sideEffects: None
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: '{{ include "vrouter-operator.webhookServiceName" . }}'
+      namespace: '{{ .Release.Namespace }}'
       path: /mutate-vrouter-kojuro-date-v1-vroutertarget
   failurePolicy: Fail
   name: mvroutertarget-v1.kb.io
