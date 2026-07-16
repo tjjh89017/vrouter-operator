@@ -1404,3 +1404,239 @@ func TestOnChange_WaitForApplied_PendingForeverFrontier_BlocksIndefinitely(t *te
 		}
 	}
 }
+
+// These tests cover the issue #35 "Ready becomes a fleet-level wait
+// primitive (WaitForApplied)" three-state completion semantics: the
+// all-Applied verification runRollout performs once the walk finds no
+// mismatch and the frontier's wait has elapsed, before setting Ready=True.
+// The any-Failed halt (RolloutHalted) and the in-walk frontier Applied gate
+// are already covered above; these tests pin the final consistency check
+// itself and the completion Ready=True/False messages.
+
+// clearConfigApplied removes the generated VRouterConfig "b.<targetName>"'s
+// Applied condition and resets its phase to Pending, simulating a config
+// that no longer reports Applied for its current generation without being
+// Failed -- e.g. a reboot-forced re-apply that has not completed yet.
+// appliedConditionForGeneration must return nil for it even though its spec
+// still matches the current render, so it is not caught by the in-walk
+// first-mismatch scan, only by the walk-completion all-Applied check.
+func clearConfigApplied(t *testing.T, cl client.Client, targetName string) {
+	t.Helper()
+	ctx := context.Background()
+	key := types.NamespacedName{Name: "b." + targetName, Namespace: "default"}
+
+	var cfg vrouterv1.VRouterConfig
+	if err := cl.Get(ctx, key, &cfg); err != nil {
+		t.Fatalf("get VRouterConfig b.%s: %v", targetName, err)
+	}
+	cfg.Status.Phase = vrouterv1.PhasePending
+	cfg.Status.Conditions = nil
+	if err := cl.Status().Update(ctx, &cfg); err != nil {
+		t.Fatalf("update VRouterConfig b.%s status: %v", targetName, err)
+	}
+}
+
+// TestOnChange_WaitForApplied_CompletionRequiresAllConfigsApplied pins the
+// walk-completion all-Applied verification: even once every target's spec
+// matches the desired render and the frontier (the last-written target) has
+// itself reached Applied and soaked, the rollout must not report Ready=True
+// while an earlier, already-passed target is not Applied for its current
+// generation. This is the "final consistency verification, not the primary
+// detection path" the issue calls out -- distinct from the any-Failed halt,
+// since the earlier target here is Pending, not Failed.
+func TestOnChange_WaitForApplied_CompletionRequiresAllConfigsApplied(t *testing.T) {
+	t0, t1, t2 := rolloutTarget("t0"), rolloutTarget("t1"), rolloutTarget("t2")
+	tmpl := rolloutTemplate("cfg")
+	pollInterval := 10 * time.Second
+	binding := rolloutBinding([]string{"t0", "t1", "t2"}, &vrouterv1.RolloutSpec{
+		Mode:         vrouterv1.RolloutModeWaitForApplied,
+		PollInterval: metav1.Duration{Duration: pollInterval},
+		// WaitAfterApplied left zero: no soak, advance as soon as Applied.
+	})
+
+	cl, scheme := newRolloutFixture(t, t0, t1, t2, tmpl, binding)
+	r := &VRouterBindingReconciler{Client: cl, Scheme: scheme}
+	ctx := context.Background()
+
+	// Walk the rollout all the way to completion: write+apply t0, t1, t2 in
+	// turn.
+	for _, tn := range []string{"t0", "t1", "t2"} {
+		if _, err := r.onChange(ctx, reconcile.Request{}, binding); err != nil {
+			t.Fatalf("reconcile (write %s): %v", tn, err)
+		}
+		if binding.Status.Rollout.LastUpdatedTarget != tn {
+			t.Fatalf("setup: frontier = %q, want %s", binding.Status.Rollout.LastUpdatedTarget, tn)
+		}
+		markConfigApplied(t, cl, tn, time.Now())
+	}
+
+	// t0 (already passed, spec still matching) regresses to not-Applied
+	// without becoming Failed -- e.g. a reboot-forced re-apply in flight.
+	clearConfigApplied(t, cl, "t0")
+
+	result, err := r.onChange(ctx, reconcile.Request{}, binding)
+	if err != nil {
+		t.Fatalf("final reconcile: onChange returned error: %v", err)
+	}
+	if result.RequeueAfter != pollInterval {
+		t.Errorf("final reconcile: RequeueAfter = %v, want %v (observe-only poll)", result.RequeueAfter, pollInterval)
+	}
+	cond := readyCondition(binding)
+	if cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != ReasonRolloutInProgress {
+		t.Fatalf("final reconcile: Ready condition = %+v, want False/RolloutInProgress", cond)
+	}
+	if !strings.Contains(cond.Message, "waiting for all configs Applied") {
+		t.Errorf("final reconcile: Ready message = %q, want it to mention \"waiting for all configs Applied\"", cond.Message)
+	}
+	// No writes: the walk found no spec mismatch, so createOrUpdateOne must
+	// not have run for any target this reconcile. t2's config content is the
+	// simplest thing to pin unchanged; the absence of any Delete on
+	// t0/t1/t2's names is implicit since cleanupOrphans only removes configs
+	// not in the desired set, and every target here is still desired.
+	if _, ok := getConfig(t, cl, "t2"); !ok {
+		t.Fatal("final reconcile: t2 config unexpectedly disappeared")
+	}
+	if binding.Status.Rollout.LastUpdatedTarget != "t2" {
+		t.Errorf("final reconcile: frontier = %q, want it unchanged at t2 (no new write)", binding.Status.Rollout.LastUpdatedTarget)
+	}
+}
+
+// TestOnChange_WaitForApplied_CompletionTrueWhenAllConfigsApplied pins the
+// success path of the same completion check: once every generated config
+// (not just the frontier) is Applied for its current generation, the walk
+// completes with Ready=True, a fleet-level message naming the config count,
+// and no requeue.
+func TestOnChange_WaitForApplied_CompletionTrueWhenAllConfigsApplied(t *testing.T) {
+	t0, t1 := rolloutTarget("t0"), rolloutTarget("t1")
+	tmpl := rolloutTemplate("cfg")
+	pollInterval := 10 * time.Second
+	binding := rolloutBinding([]string{"t0", "t1"}, &vrouterv1.RolloutSpec{
+		Mode:         vrouterv1.RolloutModeWaitForApplied,
+		PollInterval: metav1.Duration{Duration: pollInterval},
+	})
+
+	cl, scheme := newRolloutFixture(t, t0, t1, tmpl, binding)
+	r := &VRouterBindingReconciler{Client: cl, Scheme: scheme}
+	ctx := context.Background()
+
+	for _, tn := range []string{"t0", "t1"} {
+		if _, err := r.onChange(ctx, reconcile.Request{}, binding); err != nil {
+			t.Fatalf("reconcile (write %s): %v", tn, err)
+		}
+		markConfigApplied(t, cl, tn, time.Now())
+	}
+
+	result, err := r.onChange(ctx, reconcile.Request{}, binding)
+	if err != nil {
+		t.Fatalf("final reconcile: onChange returned error: %v", err)
+	}
+	if result.RequeueAfter != 0 {
+		t.Errorf("final reconcile: RequeueAfter = %v, want 0 (rollout complete)", result.RequeueAfter)
+	}
+	cond := readyCondition(binding)
+	if cond == nil || cond.Status != metav1.ConditionTrue {
+		t.Fatalf("final reconcile: Ready condition = %+v, want status True", cond)
+	}
+	if cond.Reason != "ReconcileSucceeded" {
+		t.Errorf("final reconcile: Ready reason = %q, want ReconcileSucceeded", cond.Reason)
+	}
+	if !strings.Contains(cond.Message, "2") {
+		t.Errorf("final reconcile: Ready message = %q, want it to reflect the fleet-level config count (2)", cond.Message)
+	}
+}
+
+// TestOnChange_WaitForApplied_ReRenderFlipsStaleReadyTrueInSameReconcileAsFirstWrite
+// pins the "stale True" guard the issue calls out explicitly: without the
+// write-ahead RolloutInProgress stamp, a completed rollout's stale
+// Ready=True would let `kubectl wait --for=condition=Ready` pass immediately
+// against a binding that has just started re-rolling out a new render. This
+// test drives a rollout to a genuine Ready=True completion, then triggers a
+// re-render and asserts the very first reconcile that performs the new
+// frontier's write already flips Ready to False/RolloutInProgress in that
+// same reconcile -- never leaving a reconcile where the new write happened
+// but Ready was still the old True.
+func TestOnChange_WaitForApplied_ReRenderFlipsStaleReadyTrueInSameReconcileAsFirstWrite(t *testing.T) {
+	t0, t1 := rolloutTarget("t0"), rolloutTarget("t1")
+	tmpl := rolloutTemplate("A")
+	pollInterval := 10 * time.Second
+	binding := rolloutBinding([]string{"t0", "t1"}, &vrouterv1.RolloutSpec{
+		Mode:         vrouterv1.RolloutModeWaitForApplied,
+		PollInterval: metav1.Duration{Duration: pollInterval},
+	})
+
+	cl, scheme := newRolloutFixture(t, t0, t1, tmpl, binding)
+	r := &VRouterBindingReconciler{Client: cl, Scheme: scheme}
+	ctx := context.Background()
+
+	for _, tn := range []string{"t0", "t1"} {
+		if _, err := r.onChange(ctx, reconcile.Request{}, binding); err != nil {
+			t.Fatalf("reconcile (write %s): %v", tn, err)
+		}
+		markConfigApplied(t, cl, tn, time.Now())
+	}
+	if _, err := r.onChange(ctx, reconcile.Request{}, binding); err != nil {
+		t.Fatalf("reconcile (completion): %v", err)
+	}
+	if cond := readyCondition(binding); cond == nil || cond.Status != metav1.ConditionTrue {
+		t.Fatalf("setup: Ready condition = %+v, want status True before the re-render", cond)
+	}
+
+	// Re-render: every target's desired spec changes, so t0 becomes the new
+	// first mismatch. The universal write gate passes immediately (the old
+	// frontier t1 is Applied and soaked with waitAfterApplied=0), so this
+	// single reconcile both stamps the new frontier and writes t0's config.
+	tmpl.Spec.Config = "B"
+	if err := cl.Update(ctx, tmpl); err != nil {
+		t.Fatalf("update template: %v", err)
+	}
+
+	result, err := r.onChange(ctx, reconcile.Request{}, binding)
+	if err != nil {
+		t.Fatalf("re-render reconcile: onChange returned error: %v", err)
+	}
+	cfg, ok := getConfig(t, cl, "t0")
+	if !ok {
+		t.Fatal("re-render reconcile: t0 config missing")
+	}
+	if cfg.Spec.Config != "B" {
+		t.Fatalf("re-render reconcile: t0 config = %q, want the new render \"B\" -- the write must have happened this reconcile for the test to be meaningful", cfg.Spec.Config)
+	}
+	cond := readyCondition(binding)
+	if cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != ReasonRolloutInProgress {
+		t.Fatalf("re-render reconcile: Ready condition = %+v, want False/RolloutInProgress in the SAME reconcile as the first write (stale True must not survive)", cond)
+	}
+	if result.RequeueAfter <= 0 {
+		t.Errorf("re-render reconcile: RequeueAfter = %v, want > 0", result.RequeueAfter)
+	}
+}
+
+// TestOnChange_WaitForApplied_ProgressMessageAccuracy pins the RolloutInProgress
+// message format across a full 3-target walk: each write's Ready message
+// must report i/N using the target's own position in targetRefs order, not
+// e.g. a running write count that could desync from position if a target is
+// ever skipped.
+func TestOnChange_WaitForApplied_ProgressMessageAccuracy(t *testing.T) {
+	t0, t1, t2 := rolloutTarget("t0"), rolloutTarget("t1"), rolloutTarget("t2")
+	tmpl := rolloutTemplate("cfg")
+	pollInterval := 10 * time.Second
+	binding := rolloutBinding([]string{"t0", "t1", "t2"}, &vrouterv1.RolloutSpec{
+		Mode:         vrouterv1.RolloutModeWaitForApplied,
+		PollInterval: metav1.Duration{Duration: pollInterval},
+	})
+
+	cl, scheme := newRolloutFixture(t, t0, t1, t2, tmpl, binding)
+	r := &VRouterBindingReconciler{Client: cl, Scheme: scheme}
+	ctx := context.Background()
+
+	wantMessages := []string{"1/3 targets updated", "2/3 targets updated", "3/3 targets updated"}
+	for i, tn := range []string{"t0", "t1", "t2"} {
+		if _, err := r.onChange(ctx, reconcile.Request{}, binding); err != nil {
+			t.Fatalf("reconcile (write %s): %v", tn, err)
+		}
+		cond := readyCondition(binding)
+		if cond == nil || cond.Message != wantMessages[i] {
+			t.Errorf("reconcile (write %s): Ready message = %q, want %q", tn, cond.Message, wantMessages[i])
+		}
+		markConfigApplied(t, cl, tn, time.Now())
+	}
+}

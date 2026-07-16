@@ -474,6 +474,28 @@ func (r *VRouterBindingReconciler) firstHaltingFailedConfig(ctx context.Context,
 	return nil, nil
 }
 
+// firstNotAppliedConfig scans desired in targetRefs order and returns the
+// first desiredConfig whose generated VRouterConfig is not Applied for its
+// current generation (per appliedConditionForGeneration) -- the walk-
+// completion verification for mode: WaitForApplied (see issue #35 "Ready
+// becomes a fleet-level wait primitive (WaitForApplied)"). This is a final
+// consistency check, not the primary detection path: the any-Failed halt
+// above already covers the common failure case; this additionally catches
+// e.g. a target that is Pending (never Applied, never Failed) even though
+// every desired spec otherwise matches and the frontier itself is Applied.
+func (r *VRouterBindingReconciler) firstNotAppliedConfig(ctx context.Context, binding *vrouterv1.VRouterBinding, desired []desiredConfig) (*desiredConfig, error) {
+	for i := range desired {
+		existing, err := r.getExistingConfig(ctx, binding, desired[i].Name)
+		if err != nil {
+			return nil, err
+		}
+		if appliedConditionForGeneration(existing) == nil {
+			return &desired[i], nil
+		}
+	}
+	return nil, nil
+}
+
 // runRollout implements the serial "update only the first mismatch per
 // reconcile" walk shared by mode: FixedInterval and mode: WaitForApplied (see
 // issue #35: "Reuses the phase-1 skeleton unchanged" for Phase 2). It visits
@@ -553,6 +575,26 @@ func (r *VRouterBindingReconciler) runRollout(ctx context.Context, binding *vrou
 	// Walk completed with no mismatch and the frontier's wait elapsed: the
 	// staggered writes are finished. status.rollout is left in place — a
 	// stale frontier is harmless since its wait has already elapsed.
+	if mode == vrouterv1.RolloutModeWaitForApplied {
+		// Final consistency verification, not the primary detection path (the
+		// any-Failed halt above is): Ready only becomes the fleet-level
+		// "rollout completed" True once every generated config -- not just
+		// the frontier the walk just finished waiting on -- is Applied for
+		// its current generation. See issue #35 "Ready becomes a fleet-level
+		// wait primitive (WaitForApplied)".
+		notApplied, err := r.firstNotAppliedConfig(ctx, binding, desired)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if notApplied != nil {
+			r.setReadyCondition(ctx, binding, metav1.ConditionFalse, ReasonRolloutInProgress, "waiting for all configs Applied")
+			return ctrl.Result{RequeueAfter: binding.Spec.Rollout.PollInterval.Duration}, nil
+		}
+		message := fmt.Sprintf("All %d VRouterConfigs applied.", len(desired))
+		r.setReadyCondition(ctx, binding, metav1.ConditionTrue, "ReconcileSucceeded", message)
+		return ctrl.Result{}, nil
+	}
+
 	r.setReadyCondition(ctx, binding, metav1.ConditionTrue, "ReconcileSucceeded", "All VRouterConfigs reconciled successfully.")
 	return ctrl.Result{}, nil
 }
