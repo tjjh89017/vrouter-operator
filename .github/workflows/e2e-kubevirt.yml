@@ -1,0 +1,214 @@
+name: E2E KubeVirt
+
+# Acceptance-gate workflow for issue #38: stand up the full environment on a
+# hosted runner and run the KubeVirt provider e2e suite (ginkgo label
+# "kubevirt-e2e"). It reuses the proven setup from e2e-kubevirt-probe.yml
+# (k3s + KubeVirt + a real DozenOS containerDisk guest booted on hardware KVM)
+# and adds the pieces the suite needs: a Go toolchain to run `go test`, and a
+# DozenOS containerDisk tagged for the spec.
+#
+# What this workflow deliberately does NOT do (the suite owns it, so doing it
+# here would double-work or conflict):
+#   - build/import the operator image: the suite's BeforeSuite runs
+#     `make docker-build` + LoadImageToK3sContainerd(projectImage) itself.
+#   - install CRDs / deploy the controller: the kubevirt-e2e spec's BeforeAll
+#     runs `make install` + `make deploy` itself.
+#
+# cert-manager IS installed here (the "Install cert-manager (pinned)" step),
+# early and on an un-contended node, because on this single k3s node the
+# suite's own 5m webhook-Available wait proved flaky once KubeVirt + a booting
+# VM were competing for the node. The suite is told to leave it alone via
+# CERT_MANAGER_INSTALL_SKIP=true, so its BeforeSuite skips the install and its
+# AfterSuite skips the uninstall.
+#
+# Everything below is PINNED via env. Hardware virtualization is REQUIRED: the
+# job fails fast if /dev/kvm is absent rather than silently falling back to slow
+# TCG emulation.
+
+on:
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+# Supersede an in-flight run when a newer commit is pushed to the same ref.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # k3s: pinned to the v1.33 stable line (channel v1.33 head, verified tag).
+  K3S_VERSION: "v1.33.13+k3s1"
+  # KubeVirt: latest stable release (operator + CR + matching virtctl).
+  KUBEVIRT_VERSION: "v1.8.4"
+  # cert-manager: installed by the workflow (not the suite). MUST match
+  # certmanagerVersion in test/utils/utils.go so a pre-existing install the
+  # suite would detect is byte-identical to what it would have installed.
+  CERT_MANAGER_VERSION: "v1.16.3"
+  # DozenOS guest image: latest nightly by default. Point this at a specific
+  # release's version.json (…/releases/download/<tag>/version.json) to pin.
+  DOZENOS_VERSION_JSON_URL: "https://github.com/dozenos/dozenos-nightly-build/releases/latest/download/version.json"
+  # Guest containerDisk tag the kubevirt-e2e spec expects; imported into the k3s
+  # node's containerd and surfaced to the suite via E2E_ROUTER_CONTAINERDISK.
+  E2E_ROUTER_CONTAINERDISK: "dozenos-e2e:latest"
+
+jobs:
+  e2e-kubevirt:
+    name: KubeVirt provider e2e
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Enable KVM access via udev rule
+        run: |
+          set -euo pipefail
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Require /dev/kvm (fail fast if absent)
+        run: |
+          set -euo pipefail
+          if [ -e /dev/kvm ]; then
+            echo "KVM_PRESENT=true"
+            ls -l /dev/kvm
+          else
+            echo "::error::/dev/kvm not present on this runner — hardware virtualization is required; failing instead of falling back to TCG emulation." >&2
+            exit 1
+          fi
+
+      - name: Raise inotify limits (KubeVirt-in-CI failure mode)
+        run: |
+          set -euo pipefail
+          sudo sysctl fs.inotify.max_user_watches=1048576
+          sudo sysctl fs.inotify.max_user_instances=8192
+
+      - name: Install k3s (pinned)
+        run: |
+          set -euo pipefail
+          curl -sfL https://get.k3s.io \
+            | INSTALL_K3S_VERSION="${K3S_VERSION}" sh -s - --write-kubeconfig-mode 644
+          echo "KUBECONFIG=/etc/rancher/k3s/k3s.yaml" >> "$GITHUB_ENV"
+          export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+          kubectl wait --for=condition=Ready node --all --timeout=120s
+          kubectl get nodes -o wide
+
+      - name: Install cert-manager (pinned)
+        run: |
+          set -euo pipefail
+          # Installed here, before KubeVirt + the booting VM contend for this
+          # single node, so cert-manager comes up on an un-contended node. The
+          # suite is told to skip its own install/uninstall via
+          # CERT_MANAGER_INSTALL_SKIP=true on the suite step below.
+          kubectl apply -f "https://github.com/cert-manager/cert-manager/releases/download/${CERT_MANAGER_VERSION}/cert-manager.yaml"
+          # rollout status blocks until each Deployment finishes; wait on all
+          # three so the webhook is genuinely serving before the suite runs.
+          kubectl -n cert-manager rollout status deployment/cert-manager --timeout=8m
+          kubectl -n cert-manager rollout status deployment/cert-manager-webhook --timeout=8m
+          kubectl -n cert-manager rollout status deployment/cert-manager-cainjector --timeout=8m
+          kubectl -n cert-manager get pods -o wide
+
+      - name: Install KubeVirt (pinned) and virtctl
+        run: |
+          set -euo pipefail
+          kubectl apply -f "https://github.com/kubevirt/kubevirt/releases/download/${KUBEVIRT_VERSION}/kubevirt-operator.yaml"
+          # virt-operator Available guarantees the KubeVirt CRD is established
+          # before we apply the CR below.
+          kubectl -n kubevirt rollout status deployment/virt-operator --timeout=300s
+          kubectl apply -f "https://github.com/kubevirt/kubevirt/releases/download/${KUBEVIRT_VERSION}/kubevirt-cr.yaml"
+          # /dev/kvm is guaranteed present (checked earlier), so KubeVirt uses
+          # hardware acceleration — no useEmulation patch.
+          kubectl -n kubevirt wait kubevirt/kubevirt --for=condition=Available --timeout=10m
+
+          curl -sfL -o virtctl \
+            "https://github.com/kubevirt/kubevirt/releases/download/${KUBEVIRT_VERSION}/virtctl-${KUBEVIRT_VERSION}-linux-amd64"
+          chmod +x virtctl
+          sudo mv virtctl /usr/local/bin/virtctl
+          virtctl version || true
+
+      - name: Resolve, download and verify DozenOS KVM qcow2; build & import guest containerDisk
+        run: |
+          set -euo pipefail
+          work="${RUNNER_TEMP}/dozenos"
+          mkdir -p "$work"
+
+          curl -sfL "${DOZENOS_VERSION_JSON_URL}" -o "$work/version.json"
+
+          # version.json (verified structure): top-level .version + .artifacts[],
+          # each artifact carries .flavor/.install_type/.format/.name/.sha256/.url.
+          sel='.artifacts[] | select(.flavor=="kvm" and .format=="qcow2" and .install_type=="fresh-install")'
+          version="$(jq -r '.version' "$work/version.json")"
+          name="$(jq -r "$sel | .name"   "$work/version.json")"
+          url="$(jq -r "$sel | .url"     "$work/version.json")"
+          sha="$(jq -r "$sel | .sha256"  "$work/version.json")"
+
+          echo "DozenOS version:   ${version}"
+          echo "Artifact name:     ${name}"
+          echo "Artifact url:      ${url}"
+          echo "Expected sha256:   ${sha}"
+
+          if [ -z "$url" ] || [ "$url" = "null" ]; then
+            echo "No kvm/qcow2 fresh-install artifact found in version.json" >&2
+            exit 1
+          fi
+
+          curl -sfL "$url" -o "$work/disk.qcow2"
+          echo "${sha}  ${work}/disk.qcow2" | sha256sum -c -
+
+          # containerDisk: FROM scratch with the qcow2 under /disk/ (per KubeVirt
+          # containerDisk contract). CDI is intentionally NOT used.
+          cat > "$work/Dockerfile" <<'DOCKERFILE'
+          FROM scratch
+          ADD --chown=107:107 disk.qcow2 /disk/
+          DOCKERFILE
+
+          docker build -t "${E2E_ROUTER_CONTAINERDISK}" "$work"
+          # Import into the k3s node's containerd (k3s ctr defaults to the
+          # k8s.io namespace used by the kubelet). Mirrors the suite's
+          # LoadImageToK3sContainerd path for the operator image.
+          docker save "${E2E_ROUTER_CONTAINERDISK}" | sudo k3s ctr images import -
+          sudo k3s ctr images ls | grep -i "dozenos-e2e" \
+            || { echo "guest containerDisk image missing from containerd" >&2; exit 1; }
+
+      - name: Run KubeVirt provider e2e suite
+        env:
+          # cert-manager is already installed by the workflow step above, so
+          # tell the suite to skip both its BeforeSuite install and (crucially)
+          # its AfterSuite uninstall — the latter otherwise hangs on teardown.
+          CERT_MANAGER_INSTALL_SKIP: "true"
+        run: |
+          set -euo pipefail
+          # The suite's BeforeSuite builds + imports the operator image; the
+          # kubevirt-e2e spec's BeforeAll runs `make install` / `make deploy`.
+          # cert-manager is pre-installed by the workflow and left untouched by
+          # the suite (CERT_MANAGER_INSTALL_SKIP above). We only focus the
+          # labeled spec on the pre-provisioned k3s cluster and hand it the
+          # guest containerDisk tag via E2E_ROUTER_CONTAINERDISK (job level).
+          make test-e2e E2E_CLUSTER=k3s GINKGO_LABEL_FILTER=kubevirt-e2e
+
+      - name: Collect diagnostics on failure
+        if: failure()
+        run: |
+          set +e
+          echo "===== DIAGNOSTICS ====="
+          kubectl get vm,vmi -A -o wide
+          kubectl get pods -A -o wide
+          kubectl -n kubevirt get kubevirt kubevirt -o yaml
+          echo "----- vrouter CRs -----"
+          kubectl get vrouterconfigs,vroutertargets -A -o wide
+          echo "----- VM/VMI describe (default ns) -----"
+          kubectl -n default describe vm 2>/dev/null | tail -n 80
+          kubectl -n default describe vmi 2>/dev/null | tail -n 80
+          LAUNCHER="$(kubectl -n default get pod -l kubevirt.io=virt-launcher -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)"
+          [ -n "$LAUNCHER" ] && kubectl -n default logs "$LAUNCHER" --all-containers --tail=100
+          echo "----- controller-manager logs -----"
+          kubectl -n vrouter-operator-system get pods -o wide
+          kubectl -n vrouter-operator-system logs deployment/vrouter-operator-controller-manager --all-containers --tail=200

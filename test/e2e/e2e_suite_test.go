@@ -37,6 +37,14 @@ var (
 	// isCertManagerAlreadyInstalled will be set true when CertManager CRDs be found on the cluster
 	isCertManagerAlreadyInstalled = false
 
+	// e2eCluster selects the target cluster flavor and must stay in sync with the
+	// Makefile's E2E_CLUSTER variable. The default (empty or "kind") builds and
+	// `kind load`s the manager image into a throwaway Kind cluster. Set
+	// E2E_CLUSTER=k3s to target a pre-provisioned single-node k3s cluster (e.g.
+	// the KubeVirt CI job), in which case the image is imported into the node's
+	// containerd instead.
+	e2eCluster = os.Getenv("E2E_CLUSTER")
+
 	// projectImage is the name of the image which will be build and loaded
 	// with the code source changes to be tested.
 	projectImage = "example.com/vrouter-operator:v0.0.1"
@@ -58,11 +66,17 @@ var _ = BeforeSuite(func() {
 	_, err := utils.Run(cmd)
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to build the manager(Operator) image")
 
-	// TODO(user): If you want to change the e2e test vendor from Kind, ensure the image is
-	// built and available before running the tests. Also, remove the following block.
-	By("loading the manager(Operator) image on Kind")
-	err = utils.LoadImageToKindClusterWithName(projectImage)
-	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to load the manager(Operator) image into Kind")
+	// Make the freshly built image available to the target cluster. Kind loads it
+	// directly; a pre-provisioned k3s cluster imports it into the node containerd.
+	if e2eCluster == "k3s" {
+		By("importing the manager(Operator) image into the k3s node containerd")
+		err = utils.LoadImageToK3sContainerd(projectImage)
+		ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to import the manager(Operator) image into k3s containerd")
+	} else {
+		By("loading the manager(Operator) image on Kind")
+		err = utils.LoadImageToKindClusterWithName(projectImage)
+		ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to load the manager(Operator) image into Kind")
+	}
 
 	// The tests-e2e are intended to run on a temporary cluster that is created and destroyed for testing.
 	// To prevent errors when tests run in environments with CertManager already installed,
