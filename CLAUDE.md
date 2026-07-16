@@ -76,8 +76,8 @@ This is a **kubebuilder/operator-sdk** operator (Go module: `github.com/tjjh8901
 | Path | Purpose |
 |------|---------|
 | `api/v1/` | CRD type definitions (flat, no subfolders) |
-| `internal/controller/` | Reconcilers for all 5 CRDs |
-| `internal/webhook/v1/` | Defaulting + validating webhooks for all 5 CRDs |
+| `internal/controller/` | Reconcilers for all 6 CRDs |
+| `internal/webhook/v1/` | Defaulting + validating webhooks for all 6 CRDs |
 | `internal/provider/` | Provider interface (`types/`), factory (`provider.go`), KubeVirt impl (`kubevirt/`), Proxmox impl (`proxmox/`), vrouter-daemon gRPC impl (`daemon/`), shared QGA constants (`qga/`) |
 | `config/` | Kustomize manifests (CRDs, RBAC, webhook config) |
 | `cmd/main.go` | Manager entrypoint; registers all controllers and webhooks |
