@@ -490,3 +490,77 @@ func TestOnChange_MissingParamsRef_ReturnsErrorLikeMissingTemplate(t *testing.T)
 		t.Errorf("VRouterConfig %q should not have been created when a paramsRef is missing, got err=%v", cfgName, getErr)
 	}
 }
+
+// TestBindingsForParams pins the mapping-function semantics required by
+// issue #34: editing a shared VRouterParams must re-render every binding
+// that references it via spec.paramsRefs. It mirrors the (currently
+// untested) bindingsForTemplate/bindingsForTarget full-list-and-filter
+// pattern: a matching binding (same name, resolved namespace) is enqueued,
+// a binding referencing a different name or the same name in a different
+// namespace is not, and multiple matching bindings are all enqueued.
+func TestBindingsForParams(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := vrouterv1.AddToScheme(scheme); err != nil {
+		t.Fatalf("failed to register scheme: %v", err)
+	}
+
+	params := &vrouterv1.VRouterParams{
+		ObjectMeta: metav1.ObjectMeta{Name: "shared-params", Namespace: "ns-a"},
+	}
+	matching := &vrouterv1.VRouterBinding{
+		ObjectMeta: metav1.ObjectMeta{Name: "binding-matching", Namespace: "ns-a"},
+		Spec: vrouterv1.VRouterBindingSpec{
+			ParamsRefs: []vrouterv1.NameRef{{Name: "shared-params"}},
+		},
+	}
+	matchingSecond := &vrouterv1.VRouterBinding{
+		ObjectMeta: metav1.ObjectMeta{Name: "binding-matching-2", Namespace: "ns-a"},
+		Spec: vrouterv1.VRouterBindingSpec{
+			ParamsRefs: []vrouterv1.NameRef{{Name: "shared-params"}},
+		},
+	}
+	differentName := &vrouterv1.VRouterBinding{
+		ObjectMeta: metav1.ObjectMeta{Name: "binding-different-name", Namespace: "ns-a"},
+		Spec: vrouterv1.VRouterBindingSpec{
+			ParamsRefs: []vrouterv1.NameRef{{Name: "other-params"}},
+		},
+	}
+	differentNamespace := &vrouterv1.VRouterBinding{
+		ObjectMeta: metav1.ObjectMeta{Name: "binding-different-ns", Namespace: "ns-b"},
+		Spec: vrouterv1.VRouterBindingSpec{
+			ParamsRefs: []vrouterv1.NameRef{{Name: "shared-params", Namespace: "ns-b"}},
+		},
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(params, matching, matchingSecond, differentName, differentNamespace).
+		Build()
+	r := &VRouterBindingReconciler{Client: cl, Scheme: scheme}
+
+	reqs := r.bindingsForParams(context.Background(), params)
+
+	got := make(map[types.NamespacedName]bool, len(reqs))
+	for _, req := range reqs {
+		got[req.NamespacedName] = true
+	}
+
+	want := []types.NamespacedName{
+		{Name: "binding-matching", Namespace: "ns-a"},
+		{Name: "binding-matching-2", Namespace: "ns-a"},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("bindingsForParams returned %d requests, want %d: got=%v", len(got), len(want), reqs)
+	}
+	for _, w := range want {
+		if !got[w] {
+			t.Errorf("bindingsForParams missing expected request %v, got=%v", w, reqs)
+		}
+	}
+	if got[(types.NamespacedName{Name: "binding-different-name", Namespace: "ns-a"})] {
+		t.Errorf("bindingsForParams enqueued binding-different-name, which references a different params name")
+	}
+	if got[(types.NamespacedName{Name: "binding-different-ns", Namespace: "ns-b"})] {
+		t.Errorf("bindingsForParams enqueued binding-different-ns, whose paramsRef resolves to namespace ns-b, not the params object's own ns-a")
+	}
+}

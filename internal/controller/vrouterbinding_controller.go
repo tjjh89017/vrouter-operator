@@ -245,6 +245,8 @@ func (r *VRouterBindingReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(&vrouterv1.VRouterTemplate{}, handler.EnqueueRequestsFromMapFunc(r.bindingsForTemplate)).
 		// Re-reconcile bindings when a target they reference changes.
 		Watches(&vrouterv1.VRouterTarget{}, handler.EnqueueRequestsFromMapFunc(r.bindingsForTarget)).
+		// Re-reconcile bindings when a VRouterParams they reference changes.
+		Watches(&vrouterv1.VRouterParams{}, handler.EnqueueRequestsFromMapFunc(r.bindingsForParams)).
 		Named("vrouterbinding").
 		Complete(r)
 }
@@ -279,6 +281,26 @@ func (r *VRouterBindingReconciler) bindingsForTarget(ctx context.Context, obj cl
 	var reqs []reconcile.Request
 	for i := range list.Items {
 		for _, ref := range list.Items[i].Spec.TargetRefs {
+			ns := vrouterv1.ResolveNamespace(ref, list.Items[i].Namespace)
+			if ref.Name == obj.GetName() && ns == obj.GetNamespace() {
+				reqs = append(reqs, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(&list.Items[i])})
+				break
+			}
+		}
+	}
+	return reqs
+}
+
+// bindingsForParams returns reconcile requests for all VRouterBindings that
+// reference the given VRouterParams (via paramsRefs).
+func (r *VRouterBindingReconciler) bindingsForParams(ctx context.Context, obj client.Object) []reconcile.Request {
+	var list vrouterv1.VRouterBindingList
+	if err := r.List(ctx, &list); err != nil {
+		return nil
+	}
+	var reqs []reconcile.Request
+	for i := range list.Items {
+		for _, ref := range list.Items[i].Spec.ParamsRefs {
 			ns := vrouterv1.ResolveNamespace(ref, list.Items[i].Namespace)
 			if ref.Name == obj.GetName() && ns == obj.GetNamespace() {
 				reqs = append(reqs, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(&list.Items[i])})
