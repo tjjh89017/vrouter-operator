@@ -22,6 +22,30 @@ import (
 	vrouterv1 "github.com/tjjh89017/vrouter-operator/api/v1"
 )
 
+// validateRollout checks spec.rollout's mode-specific field requirements.
+// Disabled (rollout nil/empty, or an explicit mode: Disabled) runs no checks
+// at all: a rollout only activates when a mode is explicitly written, so an
+// otherwise-invalid Disabled rollout must never block a create/update. Only
+// fields belonging to the selected mode are validated; fields belonging to
+// the other mode are ignored entirely, per the design's "fields belonging to
+// the other mode are ignored" rule.
+func validateRollout(rollout *vrouterv1.RolloutSpec) error {
+	switch rollout.EffectiveMode() {
+	case vrouterv1.RolloutModeFixedInterval:
+		if rollout.WaitInterval.Duration <= 0 {
+			return fmt.Errorf("spec.rollout.waitInterval must be greater than zero when spec.rollout.mode is FixedInterval")
+		}
+	case vrouterv1.RolloutModeWaitForApplied:
+		if rollout.PollInterval.Duration < 0 {
+			return fmt.Errorf("spec.rollout.pollInterval must not be negative")
+		}
+		if rollout.WaitAfterApplied.Duration < 0 {
+			return fmt.Errorf("spec.rollout.waitAfterApplied must not be negative")
+		}
+	}
+	return nil
+}
+
 // validateProviderConfig checks that the provider-specific sub-config is present
 // for the declared provider type. Field-level validation is handled by kubebuilder markers.
 // namespace is the namespace of the object that owns this provider config (e.g. the

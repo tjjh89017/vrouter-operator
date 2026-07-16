@@ -201,5 +201,9 @@ func validateBinding(ctx context.Context, cl client.Client, binding *vrouterv1.V
 		}
 	}
 
+	if err := validateRollout(binding.Spec.Rollout); err != nil {
+		return err
+	}
+
 	return nil
 }
