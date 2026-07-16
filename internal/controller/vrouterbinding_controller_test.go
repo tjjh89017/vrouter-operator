@@ -18,10 +18,12 @@ package controller
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -296,5 +298,195 @@ func TestOnChange_SaveUnset_PropagatesNilWithoutForcingDefault(t *testing.T) {
 	}
 	if cfg.Spec.Save != nil {
 		t.Errorf("cfg.Spec.Save = %v, want nil (the controller must propagate binding.Spec.Save unchanged, not force a default)", *cfg.Spec.Save)
+	}
+}
+
+// TestOnChange_ParamsRefsMergePriority exercises the full onChange path
+// (paramsRef resolution + MergeParamsLayers + render) for issue #34: a
+// binding with paramsRefs, its own Params, and a target with Params must
+// render a VRouterConfig where target.Params wins over binding.Params, which
+// in turn wins over the merged paramsRefs, while a key set only by a
+// paramsRef survives the fold untouched.
+func TestOnChange_ParamsRefsMergePriority(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := vrouterv1.AddToScheme(scheme); err != nil {
+		t.Fatalf("failed to register scheme: %v", err)
+	}
+
+	target := &vrouterv1.VRouterTarget{
+		ObjectMeta: metav1.ObjectMeta{Name: "params-priority-target", Namespace: "default"},
+		Spec: vrouterv1.VRouterTargetSpec{
+			Provider: vrouterv1.ProviderConfig{
+				Type:     vrouterv1.ProviderKubeVirt,
+				KubeVirt: &vrouterv1.KubeVirtConfig{Name: "params-priority-vm"},
+			},
+			Params: apiextensionsv1.JSON{Raw: []byte(`{"key": "from-target"}`)},
+		},
+	}
+	tmpl := &vrouterv1.VRouterTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "params-priority-tmpl", Namespace: "default"},
+		Spec: vrouterv1.VRouterTemplateSpec{
+			Config: "key={{ .key }} onlyRef={{ .onlyRef }}",
+		},
+	}
+	paramsRef := &vrouterv1.VRouterParams{
+		ObjectMeta: metav1.ObjectMeta{Name: "params-priority-ref", Namespace: "default"},
+		Spec: vrouterv1.VRouterParamsSpec{
+			Params: apiextensionsv1.JSON{Raw: []byte(`{"key": "from-ref", "onlyRef": "r"}`)},
+		},
+	}
+	binding := &vrouterv1.VRouterBinding{
+		ObjectMeta: metav1.ObjectMeta{Name: "params-priority-binding", Namespace: "default"},
+		Spec: vrouterv1.VRouterBindingSpec{
+			TemplateRefs: []vrouterv1.NameRef{{Name: tmpl.Name}},
+			ParamsRefs:   []vrouterv1.NameRef{{Name: paramsRef.Name}},
+			TargetRefs:   []vrouterv1.NameRef{{Name: target.Name}},
+			Params:       apiextensionsv1.JSON{Raw: []byte(`{"key": "from-binding"}`)},
+		},
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(target, tmpl, paramsRef, binding).
+		WithStatusSubresource(&vrouterv1.VRouterBinding{}).
+		Build()
+	r := &VRouterBindingReconciler{Client: cl, Scheme: scheme}
+
+	if _, err := r.onChange(context.Background(), reconcile.Request{}, binding); err != nil {
+		t.Fatalf("onChange returned error: %v", err)
+	}
+
+	var cfg vrouterv1.VRouterConfig
+	cfgName := binding.Name + "." + target.Name
+	if err := cl.Get(context.Background(), types.NamespacedName{Name: cfgName, Namespace: "default"}, &cfg); err != nil {
+		t.Fatalf("get generated VRouterConfig: %v", err)
+	}
+
+	if !strings.Contains(cfg.Spec.Config, "key=from-target") {
+		t.Errorf("cfg.Spec.Config = %q, want it to contain %q (target.Params must win over binding.Params and paramsRefs)", cfg.Spec.Config, "key=from-target")
+	}
+	if !strings.Contains(cfg.Spec.Config, "onlyRef=r") {
+		t.Errorf("cfg.Spec.Config = %q, want it to contain %q (a key only set by a paramsRef must survive the fold)", cfg.Spec.Config, "onlyRef=r")
+	}
+}
+
+// TestOnChange_ParamsRefsListOrder_LaterRefOverridesEarlier isolates the
+// paramsRefs wiring in onChange (as opposed to MergeParamsLayers itself,
+// which is already pinned directly in internal/template): with
+// binding.Params and target.Params silent on the shared key, the later
+// paramsRefs entry must win, proving onChange resolves and folds paramsRefs
+// in list order rather than, say, reversing them.
+func TestOnChange_ParamsRefsListOrder_LaterRefOverridesEarlier(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := vrouterv1.AddToScheme(scheme); err != nil {
+		t.Fatalf("failed to register scheme: %v", err)
+	}
+
+	target := &vrouterv1.VRouterTarget{
+		ObjectMeta: metav1.ObjectMeta{Name: "params-order-target", Namespace: "default"},
+		Spec: vrouterv1.VRouterTargetSpec{
+			Provider: vrouterv1.ProviderConfig{
+				Type:     vrouterv1.ProviderKubeVirt,
+				KubeVirt: &vrouterv1.KubeVirtConfig{Name: "params-order-vm"},
+			},
+		},
+	}
+	tmpl := &vrouterv1.VRouterTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "params-order-tmpl", Namespace: "default"},
+		Spec: vrouterv1.VRouterTemplateSpec{
+			Config: "key={{ .key }}",
+		},
+	}
+	paramsRef1 := &vrouterv1.VRouterParams{
+		ObjectMeta: metav1.ObjectMeta{Name: "params-order-ref-1", Namespace: "default"},
+		Spec:       vrouterv1.VRouterParamsSpec{Params: apiextensionsv1.JSON{Raw: []byte(`{"key": "ref1"}`)}},
+	}
+	paramsRef2 := &vrouterv1.VRouterParams{
+		ObjectMeta: metav1.ObjectMeta{Name: "params-order-ref-2", Namespace: "default"},
+		Spec:       vrouterv1.VRouterParamsSpec{Params: apiextensionsv1.JSON{Raw: []byte(`{"key": "ref2"}`)}},
+	}
+	binding := &vrouterv1.VRouterBinding{
+		ObjectMeta: metav1.ObjectMeta{Name: "params-order-binding", Namespace: "default"},
+		Spec: vrouterv1.VRouterBindingSpec{
+			TemplateRefs: []vrouterv1.NameRef{{Name: tmpl.Name}},
+			ParamsRefs:   []vrouterv1.NameRef{{Name: paramsRef1.Name}, {Name: paramsRef2.Name}},
+			TargetRefs:   []vrouterv1.NameRef{{Name: target.Name}},
+		},
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(target, tmpl, paramsRef1, paramsRef2, binding).
+		WithStatusSubresource(&vrouterv1.VRouterBinding{}).
+		Build()
+	r := &VRouterBindingReconciler{Client: cl, Scheme: scheme}
+
+	if _, err := r.onChange(context.Background(), reconcile.Request{}, binding); err != nil {
+		t.Fatalf("onChange returned error: %v", err)
+	}
+
+	var cfg vrouterv1.VRouterConfig
+	cfgName := binding.Name + "." + target.Name
+	if err := cl.Get(context.Background(), types.NamespacedName{Name: cfgName, Namespace: "default"}, &cfg); err != nil {
+		t.Fatalf("get generated VRouterConfig: %v", err)
+	}
+
+	if !strings.Contains(cfg.Spec.Config, "key=ref2") {
+		t.Errorf("cfg.Spec.Config = %q, want it to contain %q (later paramsRefs entry must override an earlier one)", cfg.Spec.Config, "key=ref2")
+	}
+}
+
+// TestOnChange_MissingParamsRef_ReturnsErrorLikeMissingTemplate pins that a
+// paramsRef pointing at a VRouterParams that does not exist is handled the
+// same way as a missing template: onChange returns a wrapped not-found error
+// and does not create the VRouterConfig, instead of silently skipping the
+// missing params layer.
+func TestOnChange_MissingParamsRef_ReturnsErrorLikeMissingTemplate(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := vrouterv1.AddToScheme(scheme); err != nil {
+		t.Fatalf("failed to register scheme: %v", err)
+	}
+
+	target := &vrouterv1.VRouterTarget{
+		ObjectMeta: metav1.ObjectMeta{Name: "params-missing-target", Namespace: "default"},
+		Spec: vrouterv1.VRouterTargetSpec{
+			Provider: vrouterv1.ProviderConfig{
+				Type:     vrouterv1.ProviderKubeVirt,
+				KubeVirt: &vrouterv1.KubeVirtConfig{Name: "params-missing-vm"},
+			},
+		},
+	}
+	tmpl := &vrouterv1.VRouterTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "params-missing-tmpl", Namespace: "default"},
+	}
+	binding := &vrouterv1.VRouterBinding{
+		ObjectMeta: metav1.ObjectMeta{Name: "params-missing-binding", Namespace: "default"},
+		Spec: vrouterv1.VRouterBindingSpec{
+			TemplateRefs: []vrouterv1.NameRef{{Name: tmpl.Name}},
+			ParamsRefs:   []vrouterv1.NameRef{{Name: "does-not-exist"}},
+			TargetRefs:   []vrouterv1.NameRef{{Name: target.Name}},
+		},
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(target, tmpl, binding).
+		WithStatusSubresource(&vrouterv1.VRouterBinding{}).
+		Build()
+	r := &VRouterBindingReconciler{Client: cl, Scheme: scheme}
+
+	_, err := r.onChange(context.Background(), reconcile.Request{}, binding)
+	if err == nil {
+		t.Fatal("onChange returned nil error, want an error for a paramsRef that does not exist")
+	}
+	if !errors.IsNotFound(err) && !strings.Contains(err.Error(), "does-not-exist") {
+		t.Errorf("onChange error = %v, want it to wrap a not-found error naming the missing paramsRef", err)
+	}
+
+	var cfg vrouterv1.VRouterConfig
+	cfgName := binding.Name + "." + target.Name
+	getErr := cl.Get(context.Background(), types.NamespacedName{Name: cfgName, Namespace: "default"}, &cfg)
+	if !errors.IsNotFound(getErr) {
+		t.Errorf("VRouterConfig %q should not have been created when a paramsRef is missing, got err=%v", cfgName, getErr)
 	}
 }

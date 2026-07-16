@@ -91,6 +91,36 @@ func MergeParams(base, override apiextensionsv1.JSON) (map[string]any, error) {
 	return baseMap, nil
 }
 
+// MergeParamsLayers folds an ordered sequence of JSON params layers into a
+// single map using MergeParams' merge semantics: the first layer is the base
+// and each subsequent layer overrides the accumulated result so far, so the
+// last layer given has the highest priority overall. It is the caller's
+// responsibility to order layers lowest-priority-first (e.g. VRouterBinding's
+// onChange passes paramsRefs in list order, then binding.Params, then
+// target.Params, so target.Params wins over everything). An empty layers
+// list returns an empty map. This does not change MergeParams' own two-arg
+// signature or behavior; it repeatedly calls it, re-encoding the running
+// result as JSON between steps so each fold step is just another MergeParams
+// call.
+func MergeParamsLayers(layers ...apiextensionsv1.JSON) (map[string]any, error) {
+	acc := apiextensionsv1.JSON{}
+	result := map[string]any{}
+	for i, layer := range layers {
+		merged, err := MergeParams(acc, layer)
+		if err != nil {
+			return nil, fmt.Errorf("merge params layer %d: %w", i, err)
+		}
+		result = merged
+
+		raw, err := json.Marshal(merged)
+		if err != nil {
+			return nil, fmt.Errorf("re-encode merged params after layer %d: %w", i, err)
+		}
+		acc = apiextensionsv1.JSON{Raw: raw}
+	}
+	return result, nil
+}
+
 func jsonToMap(j apiextensionsv1.JSON) (map[string]any, error) {
 	if len(j.Raw) == 0 {
 		return map[string]any{}, nil
