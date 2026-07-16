@@ -101,9 +101,21 @@ func effectiveTemplateRefs(binding *vrouterv1.VRouterBinding) []vrouterv1.NameRe
 	return refs
 }
 
-func (r *VRouterBindingReconciler) onChange(ctx context.Context, _ ctrl.Request, binding *vrouterv1.VRouterBinding) (ctrl.Result, error) {
-	log := logf.FromContext(ctx)
+// desiredConfig is the fully-rendered VRouterConfig for one target, produced
+// by renderAll before any writes happen.
+type desiredConfig struct {
+	// Name is the generated VRouterConfig's name (<binding>.<target>).
+	Name string
+	// Target is the targetRef this config was rendered for.
+	Target vrouterv1.NameRef
+	// Spec is the VRouterConfig spec to write.
+	Spec vrouterv1.VRouterConfigSpec
+}
 
+// renderAll resolves templates, paramsRefs, and targets, then renders one
+// desired VRouterConfig per targetRef, in targetRefs order. It performs no
+// writes; callers create/update VRouterConfigs from the returned slice.
+func (r *VRouterBindingReconciler) renderAll(ctx context.Context, binding *vrouterv1.VRouterBinding) ([]desiredConfig, error) {
 	// Step 1: fetch all templates in order.
 	templateRefs := effectiveTemplateRefs(binding)
 	templates := make([]vrouterv1.VRouterTemplate, 0, len(templateRefs))
@@ -111,9 +123,7 @@ func (r *VRouterBindingReconciler) onChange(ctx context.Context, _ ctrl.Request,
 		var tmpl vrouterv1.VRouterTemplate
 		ns := vrouterv1.ResolveNamespace(ref, binding.Namespace)
 		if err := r.Get(ctx, client.ObjectKey{Name: ref.Name, Namespace: ns}, &tmpl); err != nil {
-			err = fmt.Errorf("get template %q (namespace %q): %w", ref.Name, ns, err)
-			r.setReadyCondition(ctx, binding, metav1.ConditionFalse, "ReconcileError", err.Error())
-			return ctrl.Result{}, err
+			return nil, fmt.Errorf("get template %q (namespace %q): %w", ref.Name, ns, err)
 		}
 		templates = append(templates, tmpl)
 	}
@@ -125,22 +135,18 @@ func (r *VRouterBindingReconciler) onChange(ctx context.Context, _ ctrl.Request,
 		var params vrouterv1.VRouterParams
 		ns := vrouterv1.ResolveNamespace(ref, binding.Namespace)
 		if err := r.Get(ctx, client.ObjectKey{Name: ref.Name, Namespace: ns}, &params); err != nil {
-			err = fmt.Errorf("get params %q (namespace %q): %w", ref.Name, ns, err)
-			r.setReadyCondition(ctx, binding, metav1.ConditionFalse, "ReconcileError", err.Error())
-			return ctrl.Result{}, err
+			return nil, fmt.Errorf("get params %q (namespace %q): %w", ref.Name, ns, err)
 		}
 		paramsRefsJSON = append(paramsRefsJSON, params.Spec.Params)
 	}
 
-	// Step 2: resolve targets, render and reconcile one VRouterConfig per target.
-	desired := make(map[string]bool, len(binding.Spec.TargetRefs))
+	// Step 2: resolve targets and render one VRouterConfig per target.
+	desired := make([]desiredConfig, 0, len(binding.Spec.TargetRefs))
 	for _, ref := range binding.Spec.TargetRefs {
 		var target vrouterv1.VRouterTarget
 		ns := vrouterv1.ResolveNamespace(ref, binding.Namespace)
 		if err := r.Get(ctx, client.ObjectKey{Name: ref.Name, Namespace: ns}, &target); err != nil {
-			err = fmt.Errorf("get target %q: %w", ref.Name, err)
-			r.setReadyCondition(ctx, binding, metav1.ConditionFalse, "ReconcileError", err.Error())
-			return ctrl.Result{}, err
+			return nil, fmt.Errorf("get target %q: %w", ref.Name, err)
 		}
 
 		// Step 3: merge params — paramsRefs (list order) overridden by
@@ -150,9 +156,7 @@ func (r *VRouterBindingReconciler) onChange(ctx context.Context, _ ctrl.Request,
 		paramsLayers = append(paramsLayers, binding.Spec.Params, target.Spec.Params)
 		params, err := vrotemplate.MergeParamsLayers(paramsLayers...)
 		if err != nil {
-			err = fmt.Errorf("merge params for target %q: %w", ref.Name, err)
-			r.setReadyCondition(ctx, binding, metav1.ConditionFalse, "ReconcileError", err.Error())
-			return ctrl.Result{}, err
+			return nil, fmt.Errorf("merge params for target %q: %w", ref.Name, err)
 		}
 
 		// Step 4: render and concatenate config/commands from all templates in order.
@@ -161,76 +165,114 @@ func (r *VRouterBindingReconciler) onChange(ctx context.Context, _ ctrl.Request,
 			if tmpl.Spec.Config != "" {
 				rendered, err := vrotemplate.Render(tmpl.Spec.Config, params)
 				if err != nil {
-					err = fmt.Errorf("render config from template[%d] %q for target %q: %w", i, templateRefs[i].Name, ref.Name, err)
-					r.setReadyCondition(ctx, binding, metav1.ConditionFalse, "ReconcileError", err.Error())
-					return ctrl.Result{}, err
+					return nil, fmt.Errorf("render config from template[%d] %q for target %q: %w", i, templateRefs[i].Name, ref.Name, err)
 				}
 				configParts = append(configParts, rendered)
 			}
 			if tmpl.Spec.Commands != "" {
 				rendered, err := vrotemplate.Render(tmpl.Spec.Commands, params)
 				if err != nil {
-					err = fmt.Errorf("render commands from template[%d] %q for target %q: %w", i, templateRefs[i].Name, ref.Name, err)
-					r.setReadyCondition(ctx, binding, metav1.ConditionFalse, "ReconcileError", err.Error())
-					return ctrl.Result{}, err
+					return nil, fmt.Errorf("render commands from template[%d] %q for target %q: %w", i, templateRefs[i].Name, ref.Name, err)
 				}
 				commandParts = append(commandParts, rendered)
 			}
 		}
-		renderedConfig := strings.Join(configParts, "\n")
-		renderedCommands := strings.Join(commandParts, "\n")
 
-		// Step 5: create/update VRouterConfig.
-		cfgName := fmt.Sprintf("%s.%s", binding.Name, ref.Name)
-		desired[cfgName] = true
-
-		cfg := &vrouterv1.VRouterConfig{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      cfgName,
-				Namespace: binding.Namespace,
-			},
-		}
-		_, err = controllerutil.CreateOrUpdate(ctx, r.Client, cfg, func() error {
-			if cfg.Labels == nil {
-				cfg.Labels = map[string]string{}
-			}
-			cfg.Labels[vrouterv1.LabelBinding] = binding.Name
-			cfg.Labels[vrouterv1.LabelTarget] = ref.Name
-			cfg.Spec = vrouterv1.VRouterConfigSpec{
+		desired = append(desired, desiredConfig{
+			Name:   fmt.Sprintf("%s.%s", binding.Name, ref.Name),
+			Target: ref,
+			Spec: vrouterv1.VRouterConfigSpec{
 				TargetRef: vrouterv1.NameRef{Name: ref.Name},
 				Save:      binding.Spec.Save,
-				Config:    renderedConfig,
-				Commands:  renderedCommands,
-			}
-			return controllerutil.SetControllerReference(binding, cfg, r.Scheme)
+				Config:    strings.Join(configParts, "\n"),
+				Commands:  strings.Join(commandParts, "\n"),
+			},
 		})
-		if err != nil {
-			err = fmt.Errorf("sync VRouterConfig %q: %w", cfgName, err)
-			r.setReadyCondition(ctx, binding, metav1.ConditionFalse, "ReconcileError", err.Error())
-			return ctrl.Result{}, err
-		}
-		log.Info("synced VRouterConfig", "name", cfgName)
 	}
 
-	// Step 6: orphan cleanup — delete configs owned by this binding but no longer desired.
+	return desired, nil
+}
+
+// cleanupOrphans deletes VRouterConfigs owned by this binding that are no
+// longer in the desired set. Deleting a VRouterConfig only removes the K8s
+// object (its onDelete just drops the finalizer) and never triggers a commit
+// on the router, so this is safe to run every reconcile, independent of
+// rollout mode or progress.
+func (r *VRouterBindingReconciler) cleanupOrphans(ctx context.Context, binding *vrouterv1.VRouterBinding, desired []desiredConfig) error {
+	log := logf.FromContext(ctx)
+
+	desiredNames := make(map[string]bool, len(desired))
+	for _, d := range desired {
+		desiredNames[d.Name] = true
+	}
+
 	var existing vrouterv1.VRouterConfigList
 	if err := r.List(ctx, &existing,
 		client.InNamespace(binding.Namespace),
 		client.MatchingLabels{vrouterv1.LabelBinding: binding.Name},
 	); err != nil {
-		err = fmt.Errorf("list VRouterConfigs: %w", err)
-		r.setReadyCondition(ctx, binding, metav1.ConditionFalse, "ReconcileError", err.Error())
-		return ctrl.Result{}, err
+		return fmt.Errorf("list VRouterConfigs: %w", err)
 	}
 	for i := range existing.Items {
-		if !desired[existing.Items[i].Name] {
+		if !desiredNames[existing.Items[i].Name] {
 			if err := r.Delete(ctx, &existing.Items[i]); err != nil {
-				err = fmt.Errorf("delete orphan VRouterConfig %q: %w", existing.Items[i].Name, err)
-				r.setReadyCondition(ctx, binding, metav1.ConditionFalse, "ReconcileError", err.Error())
-				return ctrl.Result{}, err
+				return fmt.Errorf("delete orphan VRouterConfig %q: %w", existing.Items[i].Name, err)
 			}
 			log.Info("deleted orphan VRouterConfig", "name", existing.Items[i].Name)
 		}
+	}
+	return nil
+}
+
+// createOrUpdateAll writes every desired VRouterConfig in one pass. This is
+// today's only write path; it also serves as the write step for rollout
+// modes until the serial walk (issue #35 follow-up) lands on top of it.
+func (r *VRouterBindingReconciler) createOrUpdateAll(ctx context.Context, binding *vrouterv1.VRouterBinding, desired []desiredConfig) error {
+	log := logf.FromContext(ctx)
+
+	for _, d := range desired {
+		cfg := &vrouterv1.VRouterConfig{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      d.Name,
+				Namespace: binding.Namespace,
+			},
+		}
+		_, err := controllerutil.CreateOrUpdate(ctx, r.Client, cfg, func() error {
+			if cfg.Labels == nil {
+				cfg.Labels = map[string]string{}
+			}
+			cfg.Labels[vrouterv1.LabelBinding] = binding.Name
+			cfg.Labels[vrouterv1.LabelTarget] = d.Target.Name
+			cfg.Spec = d.Spec
+			return controllerutil.SetControllerReference(binding, cfg, r.Scheme)
+		})
+		if err != nil {
+			return fmt.Errorf("sync VRouterConfig %q: %w", d.Name, err)
+		}
+		log.Info("synced VRouterConfig", "name", d.Name)
+	}
+	return nil
+}
+
+func (r *VRouterBindingReconciler) onChange(ctx context.Context, _ ctrl.Request, binding *vrouterv1.VRouterBinding) (ctrl.Result, error) {
+	// Render the desired VRouterConfig for every target first, then clean up
+	// orphans, before any writes — see the issue #35 pseudocode. Today (and
+	// until the serial rollout walk lands on top of this), every mode takes
+	// the same one-pass write below.
+	desired, err := r.renderAll(ctx, binding)
+	if err != nil {
+		r.setReadyCondition(ctx, binding, metav1.ConditionFalse, "ReconcileError", err.Error())
+		return ctrl.Result{}, err
+	}
+
+	if err := r.cleanupOrphans(ctx, binding, desired); err != nil {
+		r.setReadyCondition(ctx, binding, metav1.ConditionFalse, "ReconcileError", err.Error())
+		return ctrl.Result{}, err
+	}
+
+	if err := r.createOrUpdateAll(ctx, binding, desired); err != nil {
+		r.setReadyCondition(ctx, binding, metav1.ConditionFalse, "ReconcileError", err.Error())
+		return ctrl.Result{}, err
 	}
 
 	r.setReadyCondition(ctx, binding, metav1.ConditionTrue, "ReconcileSucceeded", "All VRouterConfigs reconciled successfully.")
