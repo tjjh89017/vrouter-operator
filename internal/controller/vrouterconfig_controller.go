@@ -38,6 +38,7 @@ import (
 
 	vrouterv1 "github.com/tjjh89017/vrouter-operator/api/v1"
 	"github.com/tjjh89017/vrouter-operator/internal/provider"
+	"github.com/tjjh89017/vrouter-operator/internal/provider/qga"
 	providertypes "github.com/tjjh89017/vrouter-operator/internal/provider/types"
 )
 
@@ -375,7 +376,13 @@ func (r *VRouterConfigReconciler) pollExecStatus(ctx context.Context, cfg *vrout
 	// cfg.Generation may already have moved on to a generation that was
 	// never actually applied; the exec that just finished only speaks for
 	// the generation it was dispatched for.
-	if status.ExitCode == 0 {
+	// The guest exit code is not the sole success signal. A set-time
+	// validation failure prints an error to the output but still lets `commit`
+	// exit 0 (the preceding `load` left a committable diff), so the exit code
+	// can mask the failure. Also scan the combined output for a curated
+	// failure marker and treat a match as a failure even when ExitCode == 0.
+	marker, markerFailed := qga.ApplyOutputIndicatesFailure(status.Stdout + "\n" + status.Stderr)
+	if status.ExitCode == 0 && !markerFailed {
 		now := metav1.Now()
 		cfg.Status.Phase = vrouterv1.PhaseApplied
 		cfg.Status.LastAppliedTime = &now
@@ -389,8 +396,13 @@ func (r *VRouterConfigReconciler) pollExecStatus(ctx context.Context, cfg *vrout
 		})
 		log.Info("config applied successfully")
 	} else {
+		if markerFailed && status.ExitCode == 0 {
+			cfg.Status.Message = fmt.Sprintf("apply reported failure (%s) despite exitCode=0; stderr=%s",
+				marker, strings.TrimSpace(status.Stderr))
+		} else {
+			cfg.Status.Message = fmt.Sprintf("exitCode=%d stderr=%s", status.ExitCode, strings.TrimSpace(status.Stderr))
+		}
 		cfg.Status.Phase = vrouterv1.PhaseFailed
-		cfg.Status.Message = fmt.Sprintf("exitCode=%d stderr=%s", status.ExitCode, strings.TrimSpace(status.Stderr))
 		meta.SetStatusCondition(&cfg.Status.Conditions, metav1.Condition{
 			Type:               vrouterv1.ConditionApplied,
 			Status:             metav1.ConditionFalse,
@@ -398,7 +410,7 @@ func (r *VRouterConfigReconciler) pollExecStatus(ctx context.Context, cfg *vrout
 			Message:            cfg.Status.Message,
 			ObservedGeneration: cfg.Status.ObservedGeneration,
 		})
-		log.Info("config apply failed", "exitCode", status.ExitCode, "stderr", status.Stderr)
+		log.Info("config apply failed", "exitCode", status.ExitCode, "marker", marker, "stderr", status.Stderr)
 	}
 	return ctrl.Result{}, r.Status().Patch(ctx, cfg, patch)
 }

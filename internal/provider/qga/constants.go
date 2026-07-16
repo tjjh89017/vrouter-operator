@@ -33,6 +33,9 @@ const (
 	CmdExecServiceSubState = `{"execute":"guest-exec","arguments":{"path":"/usr/bin/systemctl","arg":["show","-p","SubState","--value",%q],"capture-output":true}}`
 	// CmdExecScript runs /bin/vbash with the given script path, capturing output.
 	CmdExecScript = `{"execute":"guest-exec","arguments":{"path":"/bin/vbash","arg":[%q],"capture-output":true}}`
+	// CmdExecOSRelease reads /etc/os-release from the guest, capturing output.
+	// Its ID= field selects the guest OS flavor (see internal/provider/flavor).
+	CmdExecOSRelease = `{"execute":"guest-exec","arguments":{"path":"/bin/cat","arg":["/etc/os-release"],"capture-output":true}}`
 
 	CmdExecStatus = `{"execute":"guest-exec-status","arguments":{"pid":%d}}`
 )

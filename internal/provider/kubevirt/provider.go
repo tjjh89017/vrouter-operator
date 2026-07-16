@@ -34,6 +34,7 @@ import (
 	kubevirtv1 "kubevirt.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/tjjh89017/vrouter-operator/internal/provider/flavor"
 	"github.com/tjjh89017/vrouter-operator/internal/provider/qga"
 	providertypes "github.com/tjjh89017/vrouter-operator/internal/provider/types"
 )
@@ -78,18 +79,53 @@ func (p *Provider) IsVMRunning(ctx context.Context) (bool, error) {
 	return true, nil
 }
 
-// CheckReady verifies QGA responds to ping, then polls the SubState of
-// vyos-router.service until it reports "exited" — the service is a oneshot
-// unit that runs to completion, so readiness is "has finished", not
-// "is-active/running".
+// CheckReady verifies QGA responds to ping, detects the guest OS flavor, then
+// polls the SubState of that flavor's router service until it reports "exited"
+// — the service is a oneshot unit that runs to completion, so readiness is
+// "has finished", not "is-active/running".
 func (p *Provider) CheckReady(ctx context.Context) error {
 	if _, err := p.runQGA(ctx, qga.CmdPing); err != nil {
 		return fmt.Errorf("QGA not responding: %w", err)
 	}
 
-	resp, err := p.runQGA(ctx, fmt.Sprintf(qga.CmdExecServiceSubState, qga.VyOSService))
+	fl, err := p.detectFlavor(ctx)
+	if err != nil {
+		return fmt.Errorf("detect guest OS flavor: %w", err)
+	}
+	unit := fl.RouterServiceUnit()
+
+	out, err := p.runGuestExecCapture(ctx, fmt.Sprintf(qga.CmdExecServiceSubState, unit))
 	if err != nil {
 		return fmt.Errorf("service substate check: %w", err)
+	}
+	substate := strings.TrimSpace(out)
+	if substate != "exited" {
+		return fmt.Errorf("%s not ready (substate=%s)", unit, substate)
+	}
+	return nil
+}
+
+// detectFlavor reads /etc/os-release from the guest via QGA and resolves the
+// guest OS flavor from its ID field. An unmappable ID is surfaced as an error.
+func (p *Provider) detectFlavor(ctx context.Context) (flavor.Flavor, error) {
+	out, err := p.runGuestExecCapture(ctx, qga.CmdExecOSRelease)
+	if err != nil {
+		return nil, fmt.Errorf("read /etc/os-release: %w", err)
+	}
+	id := parseOSReleaseID(out)
+	if id == "" {
+		return nil, fmt.Errorf("no ID field in /etc/os-release")
+	}
+	return flavor.ByID(id)
+}
+
+// runGuestExecCapture runs a guest-exec QGA command, polls guest-exec-status
+// until the process exits, and returns its base64-decoded stdout. A non-zero
+// exit code is reported as an error.
+func (p *Provider) runGuestExecCapture(ctx context.Context, execCmd string) (string, error) {
+	resp, err := p.runQGA(ctx, execCmd)
+	if err != nil {
+		return "", err
 	}
 	var execResult struct {
 		Return struct {
@@ -97,14 +133,14 @@ func (p *Provider) CheckReady(ctx context.Context) error {
 		} `json:"return"`
 	}
 	if err := json.Unmarshal([]byte(resp), &execResult); err != nil {
-		return fmt.Errorf("service substate check parse: %w", err)
+		return "", fmt.Errorf("guest-exec parse: %w", err)
 	}
 
-	// Poll until systemctl show exits (completes quickly in practice).
+	// Poll until the process exits (completes quickly in practice).
 	for {
 		statusResp, err := p.runQGA(ctx, fmt.Sprintf(qga.CmdExecStatus, execResult.Return.PID))
 		if err != nil {
-			return fmt.Errorf("service substate status: %w", err)
+			return "", fmt.Errorf("guest-exec-status: %w", err)
 		}
 		var statusResult struct {
 			Return struct {
@@ -114,25 +150,35 @@ func (p *Provider) CheckReady(ctx context.Context) error {
 			} `json:"return"`
 		}
 		if err := json.Unmarshal([]byte(statusResp), &statusResult); err != nil {
-			return fmt.Errorf("service substate status parse: %w", err)
+			return "", fmt.Errorf("guest-exec-status parse: %w", err)
 		}
 		if statusResult.Return.Exited {
 			if statusResult.Return.ExitCode != 0 {
-				return fmt.Errorf("systemctl show failed (exitCode=%d)", statusResult.Return.ExitCode)
+				return "", fmt.Errorf("guest-exec exited non-zero (exitCode=%d)", statusResult.Return.ExitCode)
 			}
-			substate, _ := decodeBase64OrEmpty(statusResult.Return.OutData)
-			substate = strings.TrimSpace(substate)
-			if substate != "exited" {
-				return fmt.Errorf("%s not ready (substate=%s)", qga.VyOSService, substate)
-			}
-			return nil
+			return decodeBase64OrEmpty(statusResult.Return.OutData)
 		}
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return "", ctx.Err()
 		case <-time.After(500 * time.Millisecond):
 		}
 	}
+}
+
+// parseOSReleaseID extracts the ID field from /etc/os-release content. Values
+// may be quoted; surrounding quotes and whitespace are stripped. It matches
+// only the exact "ID=" key, never "ID_LIKE=".
+func parseOSReleaseID(content string) string {
+	for _, line := range strings.Split(content, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "ID=") {
+			continue
+		}
+		val := strings.TrimSpace(strings.TrimPrefix(line, "ID="))
+		return strings.Trim(val, `"'`)
+	}
+	return ""
 }
 
 // ExecScript renders the vbash apply script, writes it to the router via QGA,
