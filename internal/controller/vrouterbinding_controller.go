@@ -20,8 +20,11 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -36,10 +39,27 @@ import (
 	vrotemplate "github.com/tjjh89017/vrouter-operator/internal/template"
 )
 
+// ReasonRolloutInProgress is the Ready=False condition reason set while a
+// rollout mode's serial walk (issue #35) is between the first write and
+// completion.
+const ReasonRolloutInProgress = "RolloutInProgress"
+
 // VRouterBindingReconciler reconciles a VRouterBinding object.
 type VRouterBindingReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+	// Now returns the current time; overridable in tests to fast-forward the
+	// rollout walk's time gates without sleeping. Defaults to time.Now.
+	Now func() time.Time
+}
+
+// now returns r.Now() when set, else time.Now(). Rollout gating always reads
+// time through this method so tests can inject a clock.
+func (r *VRouterBindingReconciler) now() time.Time {
+	if r.Now != nil {
+		return r.Now()
+	}
+	return time.Now()
 }
 
 // +kubebuilder:rbac:groups=vrouter.kojuro.date,resources=vrouterbindings,verbs=get;list;watch;create;update;patch;delete
@@ -225,40 +245,221 @@ func (r *VRouterBindingReconciler) cleanupOrphans(ctx context.Context, binding *
 }
 
 // createOrUpdateAll writes every desired VRouterConfig in one pass. This is
-// today's only write path; it also serves as the write step for rollout
-// modes until the serial walk (issue #35 follow-up) lands on top of it.
+// the write step for RolloutModeDisabled (and, for now, RolloutModeWaitForApplied
+// — see the mode dispatch comment in onChange).
 func (r *VRouterBindingReconciler) createOrUpdateAll(ctx context.Context, binding *vrouterv1.VRouterBinding, desired []desiredConfig) error {
-	log := logf.FromContext(ctx)
-
 	for _, d := range desired {
-		cfg := &vrouterv1.VRouterConfig{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      d.Name,
-				Namespace: binding.Namespace,
-			},
+		if err := r.createOrUpdateOne(ctx, binding, d); err != nil {
+			return err
 		}
-		_, err := controllerutil.CreateOrUpdate(ctx, r.Client, cfg, func() error {
-			if cfg.Labels == nil {
-				cfg.Labels = map[string]string{}
-			}
-			cfg.Labels[vrouterv1.LabelBinding] = binding.Name
-			cfg.Labels[vrouterv1.LabelTarget] = d.Target.Name
-			cfg.Spec = d.Spec
-			return controllerutil.SetControllerReference(binding, cfg, r.Scheme)
-		})
-		if err != nil {
-			return fmt.Errorf("sync VRouterConfig %q: %w", d.Name, err)
-		}
-		log.Info("synced VRouterConfig", "name", d.Name)
 	}
 	return nil
 }
 
+// createOrUpdateOne writes a single desired VRouterConfig. Shared by the
+// one-pass write (createOrUpdateAll) and the rollout walk, which writes at
+// most one config per reconcile.
+func (r *VRouterBindingReconciler) createOrUpdateOne(ctx context.Context, binding *vrouterv1.VRouterBinding, d desiredConfig) error {
+	log := logf.FromContext(ctx)
+
+	cfg := &vrouterv1.VRouterConfig{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      d.Name,
+			Namespace: binding.Namespace,
+		},
+	}
+	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, cfg, func() error {
+		if cfg.Labels == nil {
+			cfg.Labels = map[string]string{}
+		}
+		cfg.Labels[vrouterv1.LabelBinding] = binding.Name
+		cfg.Labels[vrouterv1.LabelTarget] = d.Target.Name
+		cfg.Spec = d.Spec
+		return controllerutil.SetControllerReference(binding, cfg, r.Scheme)
+	})
+	if err != nil {
+		return fmt.Errorf("sync VRouterConfig %q: %w", d.Name, err)
+	}
+	log.Info("synced VRouterConfig", "name", d.Name)
+	return nil
+}
+
+// getExistingConfig fetches the generated VRouterConfig named name in the
+// binding's namespace, returning (nil, nil) if it does not exist.
+func (r *VRouterBindingReconciler) getExistingConfig(ctx context.Context, binding *vrouterv1.VRouterBinding, name string) (*vrouterv1.VRouterConfig, error) {
+	var cfg vrouterv1.VRouterConfig
+	err := r.Get(ctx, client.ObjectKey{Name: name, Namespace: binding.Namespace}, &cfg)
+	if apierrors.IsNotFound(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get VRouterConfig %q: %w", name, err)
+	}
+	return &cfg, nil
+}
+
+// inTargetRefs reports whether targetName still appears in binding's
+// targetRefs, by name. Used by gateRemaining to detect a frontier target that
+// was evicted from targetRefs mid-rollout.
+func inTargetRefs(binding *vrouterv1.VRouterBinding, targetName string) bool {
+	for _, ref := range binding.Spec.TargetRefs {
+		if ref.Name == targetName {
+			return true
+		}
+	}
+	return false
+}
+
+// frontierRemaining returns how much longer the walk must wait before
+// advancing past the current frontier target. Mirrors the issue #35
+// pseudocode's frontierRemaining; only RolloutModeFixedInterval is
+// implemented for now (cfg is unused there but kept in the signature so a
+// future WaitForApplied branch — which needs the frontier's generated
+// VRouterConfig to read its Applied condition — can be added without
+// restructuring callers).
+func frontierRemaining(mode string, rollout *vrouterv1.RolloutSpec, _ *vrouterv1.VRouterConfig, frontier *vrouterv1.RolloutStatus, now time.Time) time.Duration {
+	switch mode {
+	case vrouterv1.RolloutModeFixedInterval:
+		if frontier == nil {
+			return 0
+		}
+		return frontier.LastUpdateTime.Time.Add(rollout.WaitInterval.Duration).Sub(now)
+	default:
+		return 0
+	}
+}
+
+// gateRemaining implements the "universal write gate" from the issue #35
+// pseudocode: before writing ANY first-mismatch target — not only when
+// advancing past the frontier — the same wait that would apply to the
+// frontier must first be satisfied. This stops a re-render's first write
+// from overlapping with a still in-flight previous-render frontier commit.
+func (r *VRouterBindingReconciler) gateRemaining(ctx context.Context, binding *vrouterv1.VRouterBinding, mode string, frontier *vrouterv1.RolloutStatus, next desiredConfig, now time.Time) (time.Duration, error) {
+	if frontier == nil || frontier.LastUpdatedTarget == "" {
+		// No frontier recorded: first rollout ever, nothing to gate on.
+		return 0, nil
+	}
+	if next.Target.Name == frontier.LastUpdatedTarget {
+		// First mismatch IS the frontier itself (render changed while it was
+		// still applying): overwrite directly. Single-router commits are
+		// already serialized by the config controller's execPID handling.
+		return 0, nil
+	}
+	if !inTargetRefs(binding, frontier.LastUpdatedTarget) {
+		// Frontier evicted mid-rollout: degrade to a pure time gate. Never
+		// health-gate a target the user just removed — it is often removed
+		// precisely because it is dead — but still hold the interval so an
+		// overlapping commit is not created.
+		d := rolloutWaitDuration(mode, binding.Spec.Rollout)
+		return frontier.LastUpdateTime.Time.Add(d).Sub(now), nil
+	}
+
+	cfgName := fmt.Sprintf("%s.%s", binding.Name, frontier.LastUpdatedTarget)
+	cfg, err := r.getExistingConfig(ctx, binding, cfgName)
+	if err != nil {
+		return 0, err
+	}
+	return frontierRemaining(mode, binding.Spec.Rollout, cfg, frontier, now), nil
+}
+
+// rolloutWaitDuration returns the mode-appropriate wait used by the
+// frontier-evicted time-degraded gate. FixedInterval uses waitInterval;
+// WaitForApplied (Phase 2) will use waitAfterApplied.
+func rolloutWaitDuration(mode string, rollout *vrouterv1.RolloutSpec) time.Duration {
+	if mode == vrouterv1.RolloutModeWaitForApplied {
+		return rollout.WaitAfterApplied.Duration
+	}
+	return rollout.WaitInterval.Duration
+}
+
+// stampRolloutFrontier performs the rollout walk's write-ahead stamp: it
+// records the frontier (target, now) in status.rollout and sets the Ready
+// condition to False/RolloutInProgress in a single status update, before the
+// generated VRouterConfig itself is written. Stamping first means a crash
+// between the stamp and the config write leaves the config still mismatched,
+// so the next reconcile finds the same first mismatch and retries — there is
+// never a state where a config was updated but unrecorded.
+func (r *VRouterBindingReconciler) stampRolloutFrontier(ctx context.Context, binding *vrouterv1.VRouterBinding, targetName string, now time.Time, message string) error {
+	patch := client.MergeFrom(binding.DeepCopy())
+	binding.Status.Rollout = &vrouterv1.RolloutStatus{
+		LastUpdatedTarget: targetName,
+		LastUpdateTime:    metav1.NewTime(now),
+	}
+	meta.SetStatusCondition(&binding.Status.Conditions, metav1.Condition{
+		Type:               vrouterv1.ConditionReady,
+		Status:             metav1.ConditionFalse,
+		Reason:             ReasonRolloutInProgress,
+		Message:            message,
+		ObservedGeneration: binding.Generation,
+	})
+	return r.Status().Patch(ctx, binding, patch)
+}
+
+// runFixedIntervalRollout implements mode: FixedInterval per the issue #35
+// pseudocode's "update only the first mismatch per reconcile" walk: it visits
+// desired targets in order, writes at most one config (the first whose
+// rendered spec differs from the existing generated VRouterConfig, once the
+// universal write gate is satisfied), and requeues rather than looping in
+// memory. The wait is always computed from the persisted
+// status.rollout.lastUpdateTime, never from in-memory state, so the interval
+// is a hard guarantee across operator restarts and unrelated watch events.
+func (r *VRouterBindingReconciler) runFixedIntervalRollout(ctx context.Context, binding *vrouterv1.VRouterBinding, desired []desiredConfig) (ctrl.Result, error) {
+	mode := binding.Spec.Rollout.EffectiveMode()
+	now := r.now()
+	frontier := binding.Status.Rollout
+
+	for i, d := range desired {
+		existing, err := r.getExistingConfig(ctx, binding, d.Name)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+
+		if existing == nil || !equality.Semantic.DeepEqual(existing.Spec, d.Spec) {
+			// First mismatch: the only place that writes a config this reconcile.
+			wait, err := r.gateRemaining(ctx, binding, mode, frontier, d, now)
+			if err != nil {
+				return ctrl.Result{}, err
+			}
+			if wait > 0 {
+				return ctrl.Result{RequeueAfter: wait}, nil
+			}
+
+			message := fmt.Sprintf("%d/%d targets updated", i+1, len(desired))
+			if err := r.stampRolloutFrontier(ctx, binding, d.Target.Name, now, message); err != nil {
+				return ctrl.Result{}, err
+			}
+			if err := r.createOrUpdateOne(ctx, binding, d); err != nil {
+				return ctrl.Result{}, err
+			}
+			return ctrl.Result{RequeueAfter: binding.Spec.Rollout.WaitInterval.Duration}, nil
+		}
+
+		// Spec matches. If this target isn't the frontier, it either never
+		// needed an update or completed earlier — advance.
+		if frontier == nil || d.Target.Name != frontier.LastUpdatedTarget {
+			continue
+		}
+
+		// Spec matches AND this is the frontier: wait out its interval
+		// before advancing past it.
+		if remaining := frontierRemaining(mode, binding.Spec.Rollout, existing, frontier, now); remaining > 0 {
+			return ctrl.Result{RequeueAfter: remaining}, nil
+		}
+	}
+
+	// Walk completed with no mismatch and the frontier's wait elapsed: the
+	// staggered writes are finished. status.rollout is left in place — a
+	// stale frontier is harmless since its wait has already elapsed.
+	r.setReadyCondition(ctx, binding, metav1.ConditionTrue, "ReconcileSucceeded", "All VRouterConfigs reconciled successfully.")
+	return ctrl.Result{}, nil
+}
+
 func (r *VRouterBindingReconciler) onChange(ctx context.Context, _ ctrl.Request, binding *vrouterv1.VRouterBinding) (ctrl.Result, error) {
 	// Render the desired VRouterConfig for every target first, then clean up
-	// orphans, before any writes — see the issue #35 pseudocode. Today (and
-	// until the serial rollout walk lands on top of this), every mode takes
-	// the same one-pass write below.
+	// orphans, before any writes — see the issue #35 pseudocode. Every
+	// reconcile re-renders and walks from the top regardless of mode, which
+	// is what lets a mid-rollout spec change "restart" the walk implicitly
+	// (the universal write gate then preserves the stagger across renders).
 	desired, err := r.renderAll(ctx, binding)
 	if err != nil {
 		r.setReadyCondition(ctx, binding, metav1.ConditionFalse, "ReconcileError", err.Error())
@@ -268,6 +469,17 @@ func (r *VRouterBindingReconciler) onChange(ctx context.Context, _ ctrl.Request,
 	if err := r.cleanupOrphans(ctx, binding, desired); err != nil {
 		r.setReadyCondition(ctx, binding, metav1.ConditionFalse, "ReconcileError", err.Error())
 		return ctrl.Result{}, err
+	}
+
+	// Mode dispatch: RolloutModeFixedInterval takes the serial rollout walk
+	// below. RolloutModeDisabled and, for now, RolloutModeWaitForApplied both
+	// fall through to the one-pass write. WaitForApplied's own health-gated
+	// walk is issue #35 Phase 2; falling through to one-pass here (rather
+	// than reusing the FixedInterval walk) keeps semantics honest in the
+	// meantime, since WaitForApplied's Applied-gate isn't implemented yet and
+	// its waitInterval field doesn't even exist.
+	if binding.Spec.Rollout.EffectiveMode() == vrouterv1.RolloutModeFixedInterval {
+		return r.runFixedIntervalRollout(ctx, binding, desired)
 	}
 
 	if err := r.createOrUpdateAll(ctx, binding, desired); err != nil {
