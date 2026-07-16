@@ -177,6 +177,52 @@ func LoadImageToKindClusterWithName(name string) error {
 	return err
 }
 
+// LoadImageToK3sContainerd imports a local docker image into the k3s node's
+// containerd image store. Used when the e2e suite targets a pre-provisioned
+// single-node k3s cluster instead of Kind (see the KubeVirt CI job). k3s ctr
+// defaults to the k8s.io containerd namespace that the kubelet reads, so the
+// imported image is available to pods without pushing to a registry. This
+// mirrors the proven CI step: `docker save <name> | sudo k3s ctr images import -`.
+func LoadImageToK3sContainerd(name string) error {
+	// Stream the docker image tarball straight into k3s containerd rather than
+	// buffering it to disk: docker save (stdout) -> k3s ctr images import (stdin).
+	saveCmd := exec.Command("docker", "save", name)
+	importCmd := exec.Command("sudo", "k3s", "ctr", "images", "import", "-")
+
+	pipe, err := saveCmd.StdoutPipe()
+	if err != nil {
+		return fmt.Errorf("failed to create docker save pipe: %w", err)
+	}
+	importCmd.Stdin = pipe
+
+	var importOut bytes.Buffer
+	importCmd.Stdout = &importOut
+	importCmd.Stderr = &importOut
+
+	if err := importCmd.Start(); err != nil {
+		return fmt.Errorf("failed to start k3s ctr images import: %w", err)
+	}
+	if err := saveCmd.Run(); err != nil {
+		return fmt.Errorf("failed to run docker save %q: %w", name, err)
+	}
+	if err := importCmd.Wait(); err != nil {
+		return fmt.Errorf("k3s ctr images import failed: %q: %w", importOut.String(), err)
+	}
+
+	// Verify the image landed in the containerd namespace the kubelet reads.
+	verifyCmd := exec.Command("sudo", "k3s", "ctr", "images", "ls", "-q")
+	output, err := Run(verifyCmd)
+	if err != nil {
+		return fmt.Errorf("failed to list k3s containerd images: %w", err)
+	}
+	for _, line := range GetNonEmptyLines(output) {
+		if strings.Contains(line, name) {
+			return nil
+		}
+	}
+	return fmt.Errorf("image %q not found in k3s containerd after import", name)
+}
+
 // GetNonEmptyLines converts given command output string into individual objects
 // according to line breakers, and ignores the empty elements in it.
 func GetNonEmptyLines(output string) []string {

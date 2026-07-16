@@ -118,8 +118,29 @@ test: manifests generate fmt vet setup-envtest ## Run tests.
 # - CERT_MANAGER_INSTALL_SKIP=true
 KIND_CLUSTER ?= vrouter-operator-test-e2e
 
+# E2E_CLUSTER selects the cluster flavor the e2e suite targets. The default
+# "kind" creates and deletes a throwaway Kind cluster locally. Set E2E_CLUSTER=k3s
+# to run against a pre-provisioned single-node k3s cluster (e.g. the KubeVirt CI
+# job, which stands up k3s + KubeVirt and sets KUBECONFIG itself): setup/cleanup
+# become no-ops that leave the external cluster intact, and the manager image is
+# imported into the node's containerd instead of `kind load`.
+E2E_CLUSTER ?= kind
+
+# GINKGO_LABEL_FILTER optionally focuses the e2e run on specs carrying a given
+# ginkgo label (e.g. GINKGO_LABEL_FILTER=kubevirt-e2e for the k3s KubeVirt CI
+# job, which stands up real KubeVirt + KVM and runs only that labeled spec).
+# Empty by default: the full suite runs, preserving existing behavior.
+GINKGO_LABEL_FILTER ?=
+
+# E2E_TIMEOUT bounds the whole `go test` binary. The default go test timeout is
+# 10m, which the real KubeVirt suite (VM boot + per-spec multi-minute Eventually
+# waits) blows through; the k3s CI job's own budget is 40m, so allow well over
+# the default here. Harmless to the fast Kind path, which finishes long before.
+E2E_TIMEOUT ?= 35m
+
 .PHONY: setup-test-e2e
-setup-test-e2e: ## Set up a Kind cluster for e2e tests if it does not exist
+setup-test-e2e: ## Set up a Kind cluster for e2e tests if it does not exist (skipped when E2E_CLUSTER!=kind)
+ifeq ($(E2E_CLUSTER),kind)
 	@command -v $(KIND) >/dev/null 2>&1 || { \
 		echo "Kind is not installed. Please install Kind manually."; \
 		exit 1; \
@@ -131,15 +152,26 @@ setup-test-e2e: ## Set up a Kind cluster for e2e tests if it does not exist
 			echo "Creating Kind cluster '$(KIND_CLUSTER)'..."; \
 			$(KIND) create cluster --name $(KIND_CLUSTER) ;; \
 	esac
+else
+	@echo "E2E_CLUSTER=$(E2E_CLUSTER): using pre-provisioned cluster, skipping Kind creation."
+	@$(KUBECTL) cluster-info >/dev/null 2>&1 || { \
+		echo "No reachable cluster: set KUBECONFIG to the pre-provisioned $(E2E_CLUSTER) cluster."; \
+		exit 1; \
+	}
+endif
 
 .PHONY: test-e2e
-test-e2e: setup-test-e2e manifests generate fmt vet ## Run the e2e tests. Expected an isolated environment using Kind.
-	KIND_CLUSTER=$(KIND_CLUSTER) go test ./test/e2e/ -v -ginkgo.v
-	$(MAKE) cleanup-test-e2e
+test-e2e: setup-test-e2e manifests generate fmt vet ## Run the e2e tests. Expected an isolated Kind environment, or a pre-provisioned cluster via E2E_CLUSTER.
+	KIND_CLUSTER=$(KIND_CLUSTER) E2E_CLUSTER=$(E2E_CLUSTER) go test ./test/e2e/ -v -ginkgo.v -timeout $(E2E_TIMEOUT) $(if $(GINKGO_LABEL_FILTER),-ginkgo.label-filter=$(GINKGO_LABEL_FILTER),)
+	$(MAKE) cleanup-test-e2e E2E_CLUSTER=$(E2E_CLUSTER)
 
 .PHONY: cleanup-test-e2e
-cleanup-test-e2e: ## Tear down the Kind cluster used for e2e tests
+cleanup-test-e2e: ## Tear down the Kind cluster used for e2e tests (skipped when E2E_CLUSTER!=kind)
+ifeq ($(E2E_CLUSTER),kind)
 	@$(KIND) delete cluster --name $(KIND_CLUSTER)
+else
+	@echo "E2E_CLUSTER=$(E2E_CLUSTER): pre-provisioned cluster left intact."
+endif
 
 .PHONY: lint
 lint: golangci-lint ## Run golangci-lint linter
