@@ -18,11 +18,11 @@ vRouter-Operator is a Kubernetes Operator that manages VyOS virtual router confi
 ### 2.1 Controller Flow
 
 ```
-VRouterTemplate + VRouterTarget + VRouterBinding
+VRouterTemplate + VRouterParams + VRouterTarget + VRouterBinding
          │
    BindingController
    → resolve targetRefs
-   → merge params (binding → target)
+   → merge params (paramsRefs → binding → target)
    → render and concatenate templates in order
    → create/update VRouterConfig per router (ownerRef → Binding)
          │
@@ -197,8 +197,11 @@ spec:
   templateRefs:             # ordered list; later templates' config/commands appended after earlier ones
     - name: base-config
     - name: bgp-router
+  paramsRefs:               # ordered list; later entries override earlier ones; see §3.6/§4.1
+    - name: site-defaults
+    - name: subnet-params
   save: true              # persist config after commit, default: true
-  params:                 # common, lowest priority
+  params:                 # common, overrides all paramsRefs; still overridden by target.params
     ntpServer: "10.0.0.1"
     dnsServer: "8.8.8.8"
   targetRefs:
@@ -208,7 +211,9 @@ spec:
 
 > **Backward compatibility**: The deprecated `templateRef` field (singular, optional) is still accepted. If set, it is prepended to `templateRefs` as the highest-priority (first) template.
 
-**Same-namespace-only references**: every entry in `templateRef`, `templateRefs`, and `targetRefs` must resolve to an object in the VRouterBinding's own namespace. A `namespace` field left empty defaults to the binding's namespace (as usual); a `namespace` field set to any *other* namespace is rejected by the validating webhook. See §6.2 for the full policy.
+- `paramsRefs` is an ordered, optional list of `VRouterParams` objects (§3.6) to merge as the lowest-priority params layer: later entries override earlier ones, and the fully-merged `paramsRefs` result is itself overridden by this binding's own `params`, which in turn is overridden by the target's `params` (§4.1). An empty or absent `paramsRefs` list is valid and simply contributes no extra layer.
+
+**Same-namespace-only references**: every entry in `templateRef`, `templateRefs`, `paramsRefs`, and `targetRefs` must resolve to an object in the VRouterBinding's own namespace. A `namespace` field left empty defaults to the binding's namespace (as usual); a `namespace` field set to any *other* namespace is rejected by the validating webhook. See §6.2 for the full policy.
 
 Short names: `vrb`, `vrouterbinding`
 
@@ -291,14 +296,38 @@ Short names: `vrc`, `vrouterconfig`
 
 ---
 
+### 3.6 VRouterParams
+
+Holds a reusable, schemaless block of `params` that one or more `VRouterBinding` objects can merge in via `spec.paramsRefs` (§3.3). Has no status subresource — it is a pure data object.
+
+```yaml
+apiVersion: vrouter.kojuro.date/v1
+kind: VRouterParams
+metadata:
+  name: subnet-params
+spec:
+  params:                 # arbitrary structure (x-kubernetes-preserve-unknown-fields), same shape as target.params
+    subnetGateway: "192.168.1.1"
+```
+
+- `params` uses `x-kubernetes-preserve-unknown-fields: true` (schemaless), stored as `apiextensionsv1.JSON` in Go — identical treatment to `VRouterTarget.spec.params` and `VRouterBinding.spec.params`
+- Referenced only by `VRouterBinding.spec.paramsRefs`, same-namespace only (§3.3, §6.2); no other CRD references a VRouterParams
+- Cannot be deleted while any VRouterBinding in the same namespace still references it via `paramsRefs` — see §6.2
+- Short names: `vrtp`, `vrouterparams`
+
+---
+
 ## 4. Params Merge Design
 
 ### 4.1 Priority Order
 
 | Priority | Source | Description |
 |----------|--------|-------------|
-| 1 (lowest) | `binding.params` | Common base, shared across all targets |
-| 2 (highest) | `target.params` | Overrides binding.params |
+| 1 (lowest) | `paramsRefs` (in list order) | Ordered list of `VRouterParams` (§3.6) resolved by BindingController; later entries override earlier ones |
+| 2 | `binding.params` | Common base, shared across all targets; overrides the merged `paramsRefs` result |
+| 3 (highest) | `target.params` | Overrides both `binding.params` and `paramsRefs` |
+
+BindingController's `onChange` builds the layer list in exactly this order — `paramsRefs` (as resolved, in `spec.paramsRefs` list order), then `binding.Params`, then `target.Params` — and folds them with `MergeParamsLayers` (§4.2), so `target.params` always wins overall, matching the pre-`paramsRefs` behavior when `paramsRefs` is empty.
 
 ### 4.2 Deep Merge Implementation
 
@@ -324,6 +353,8 @@ func mergeParams(base, override apiextensionsv1.JSON) (map[string]interface{}, e
 }
 ```
 
+`MergeParamsLayers(layers ...apiextensionsv1.JSON)` (`internal/template/render.go`) extends this to more than two layers: it folds an ordered list into a single map by repeatedly calling `MergeParams` — the first layer is the base, and each subsequent layer overrides the accumulated result so far, so the last layer given has the highest priority overall (an empty layer list returns an empty map). It does not change `MergeParams`' own two-arg signature or semantics; each fold step re-encodes the running result as JSON and is just another `MergeParams` call. BindingController's `onChange` calls it with `paramsRefs` (in list order) followed by `binding.Params` then `target.Params`, producing the 3-layer priority order in §4.1.
+
 ### 4.3 Merge Semantics
 
 `mergo.WithOverride` is a *presence*-based merge, not a *truthiness*-based one: whether a key wins is decided by whether it is present in the override JSON, not by whether its decoded value is Go's zero value.
@@ -336,7 +367,7 @@ func mergeParams(base, override apiextensionsv1.JSON) (map[string]interface{}, e
 | slice override slice, override is `[]` (present but empty) | Also replaces the base slice — `mergo.WithOverrideEmptySlice` is set specifically so an empty override list clears the base list instead of being ignored. |
 | key entirely absent from the override JSON | Keeps base value — only keys that are present in the decoded override map participate in the merge. |
 
-**Practical consequence**: there is no way to distinguish "the override explicitly set this key to false/empty/zero" from "the override didn't mention this key" once the override JSON has been decoded — both look the same to mergo except for the "is the key present at all" check above. A `target.params` (or `binding.params`) block that merely *mentions* a key, even with a zero value, silently overrides a truthy base default (e.g. a template's `firewall.enabled: true` can be turned off by a target that sets `firewall.enabled: false`, but also by any override value that happens to decode to `false`/`""`/`0`). This is intentional, pinned behavior — not a bug — and is covered by characterization tests. Template and target authors who need "leave this key alone" semantics must omit the key entirely from `params`, not set it to its zero value.
+**Practical consequence**: there is no way to distinguish "the override explicitly set this key to false/empty/zero" from "the override didn't mention this key" once the override JSON has been decoded — both look the same to mergo except for the "is the key present at all" check above. A `target.params` (or `binding.params`) block that merely *mentions* a key, even with a zero value, silently overrides a truthy base default (e.g. a template's `firewall.enabled: true` can be turned off by a target that sets `firewall.enabled: false`, but also by any override value that happens to decode to `false`/`""`/`0`). This is intentional, pinned behavior — not a bug — and is covered by characterization tests. Template and target authors who need "leave this key alone" semantics must omit the key entirely from `params`, not set it to its zero value. These per-pair semantics apply at every fold step of `MergeParamsLayers` (§4.2), not only to a single two-layer merge — e.g. a `paramsRefs` entry that merely mentions a key with a zero value can silently override an earlier `paramsRefs` entry's truthy value, exactly as `target.params` can override `binding.params`.
 
 ---
 
@@ -386,11 +417,12 @@ Performs cross-field validation and reference checks that kubebuilder JSON schem
 
 | Resource | Validation |
 |----------|------------|
-| VRouterTarget | `provider.kubevirt` (with non-empty `name`) must be set when `type=kubevirt`; `provider.proxmox` must be set when `type=proxmox`; `provider.daemon` (with non-empty `address` and `agentID`) must be set when `type=vrouter-daemon`; for Proxmox, `clusterRef.name` is mandatory and `clusterRef.namespace`, if set, must equal the VRouterTarget's own namespace (cross-namespace references are rejected). On **delete**, rejected if any VRouterBinding's `targetRefs` or any VRouterConfig's `targetRef` in the same namespace still resolves to this VRouterTarget (error names one referencing object and, if more exist, how many others) — this is the only CRD in §6.2 whose webhook registers the `delete` verb. This check fails closed: a `List` error on either kind blocks the deletion rather than letting it through, and a referencing object that is itself already terminating (non-nil `deletionTimestamp`) still counts as a blocker until its own finalizer is removed |
+| VRouterTarget | `provider.kubevirt` (with non-empty `name`) must be set when `type=kubevirt`; `provider.proxmox` must be set when `type=proxmox`; `provider.daemon` (with non-empty `address` and `agentID`) must be set when `type=vrouter-daemon`; for Proxmox, `clusterRef.name` is mandatory and `clusterRef.namespace`, if set, must equal the VRouterTarget's own namespace (cross-namespace references are rejected). On **delete**, rejected if any VRouterBinding's `targetRefs` or any VRouterConfig's `targetRef` in the same namespace still resolves to this VRouterTarget (error names one referencing object and, if more exist, how many others) — VRouterTarget and VRouterParams (below) are the only two CRDs in this table whose webhooks register the `delete` verb. This check fails closed: a `List` error on either kind blocks the deletion rather than letting it through, and a referencing object that is itself already terminating (non-nil `deletionTimestamp`) still counts as a blocker until its own finalizer is removed |
 | VRouterConfig | `spec.targetRef` must resolve to an existing VRouterTarget; `spec.targetRef.namespace`, if set, must equal the VRouterConfig's own namespace (cross-namespace references are rejected). VRouterConfig does **not** carry its own `provider` block, so there is no provider cross-field validation here — only the targetRef checks above. |
-| VRouterBinding | `spec.targetRefs` must not be empty; at least one of `spec.templateRef` (deprecated) or `spec.templateRefs` must be set; every entry in `spec.templateRef`, `spec.templateRefs[]`, and `spec.targetRefs[]` must resolve to an existing object, and each entry's `namespace`, if set, must equal the VRouterBinding's own namespace (cross-namespace references are rejected) |
+| VRouterBinding | `spec.targetRefs` must not be empty; at least one of `spec.templateRef` (deprecated) or `spec.templateRefs` must be set; every entry in `spec.templateRef`, `spec.templateRefs[]`, `spec.paramsRefs[]`, and `spec.targetRefs[]` must resolve to an existing object, and each entry's `namespace`, if set, must equal the VRouterBinding's own namespace (cross-namespace references are rejected); `spec.paramsRefs` is optional — an empty or absent list is valid and simply skips this check |
 | VRouterTemplate | `spec.config` and `spec.commands`, when set, must each parse as valid Go `text/template` syntax (parsed with the same sprig FuncMap used at render time — see §5.1); a syntax error is rejected at admission instead of surfacing later as a render failure |
 | ProxmoxCluster | `spec.endpoints` must be non-empty, and no entry may be an empty string; `spec.syncInterval` must be greater than zero; `spec.credentialsRef.name` must be non-empty |
+| VRouterParams | `ValidateCreate`/`ValidateUpdate` are no-ops — the schemaless `params` block has no cross-field constraints to check. On **delete**, rejected if any VRouterBinding's `spec.paramsRefs` in the same namespace still resolves to this VRouterParams (error names one referencing binding and, if more exist, how many others); unlike VRouterTarget, no other CRD references a VRouterParams, so only bindings are checked. This check fails closed the same way as VRouterTarget's delete check above (a `List` error blocks the deletion) |
 
 For VRouterTarget, VRouterConfig, VRouterBinding, and ProxmoxCluster, the entire table of checks above (not just the reference-existence and cross-namespace checks) is skipped during `ValidateUpdate` once the object already has a non-nil `deletionTimestamp`. This matters for the finalizer-removal update that every controller's `onDelete` performs (see §7): without the skip, a spec that is now stale — a deleted reference, a pre-existing cross-namespace reference (see the upgrade caveat below), or even a plain presence check such as `kubevirt.name` or `credentialsRef.name` being empty — would make that final update fail admission and deadlock deletion.
 
@@ -398,13 +430,13 @@ Webhooks are disabled when `ENABLE_WEBHOOKS=false` (env var, checked in `cmd/mai
 
 #### Same-namespace-only references (standing policy)
 
-`VRouterBinding.spec.templateRef` / `templateRefs` / `targetRefs`, `VRouterConfig.spec.targetRef`, and `VRouterTarget.spec.provider.proxmox.clusterRef` may only reference objects in the same namespace as the referencing object. If a reference's `namespace` field is left empty it resolves to the referencing object's own namespace (via `ResolveNamespace`, unchanged); if it is set to any *other* namespace, the validating webhook rejects the create/update.
+`VRouterBinding.spec.templateRef` / `templateRefs` / `paramsRefs` / `targetRefs`, `VRouterConfig.spec.targetRef`, and `VRouterTarget.spec.provider.proxmox.clusterRef` may only reference objects in the same namespace as the referencing object. If a reference's `namespace` field is left empty it resolves to the referencing object's own namespace (via `ResolveNamespace`, unchanged); if it is set to any *other* namespace, the validating webhook rejects the create/update.
 
 This is a **deliberate, standing design decision**, not a temporary limitation to be lifted later. Allowing an object in one namespace to reference credentials or targets in another namespace — with no authorization check beyond "the name resolves to something" — lets a tenant who can only create objects in their own namespace borrow another namespace's Proxmox API credentials or bind to another namespace's routers, and QGA `guest-exec` reaches the guest as root. Rejecting cross-namespace references at admission removes this confused-deputy path entirely, at the cost of not supporting shared credentials across namespaces.
 
 If multiple namespaces need to target VMs on the same Proxmox cluster, co-locate a `ProxmoxCluster` (and the `Secret` it references via `credentialsRef`) in **each** namespace that needs it, rather than sharing one `ProxmoxCluster` across namespaces. This duplicates the endpoint/credential object but keeps every reference same-namespace and keeps the authorization boundary aligned with Kubernetes RBAC namespace boundaries.
 
-> **Upgrade caveat**: enabling this webhook on an existing installation does not retroactively fix objects created before the webhook existed. A `VRouterBinding`, `VRouterConfig`, or `VRouterTarget` that already has a cross-namespace reference keeps working with its old (now inconsistent) behavior — the webhook only evaluates `ValidateCreate` and `ValidateUpdate`, so an existing object is not re-validated until the next time it is edited (or deleted and recreated). Operators upgrading to a version with this webhook enabled should audit existing objects for cross-namespace references (non-empty `namespace` fields in `templateRef`/`templateRefs`/`targetRefs`/`targetRef`/`clusterRef` that differ from the referencing object's own namespace) before relying on the same-namespace guarantee.
+> **Upgrade caveat**: enabling this webhook on an existing installation does not retroactively fix objects created before the webhook existed. A `VRouterBinding`, `VRouterConfig`, or `VRouterTarget` that already has a cross-namespace reference keeps working with its old (now inconsistent) behavior — the webhook only evaluates `ValidateCreate` and `ValidateUpdate`, so an existing object is not re-validated until the next time it is edited (or deleted and recreated). Operators upgrading to a version with this webhook enabled should audit existing objects for cross-namespace references (non-empty `namespace` fields in `templateRef`/`templateRefs`/`paramsRefs`/`targetRefs`/`targetRef`/`clusterRef` that differ from the referencing object's own namespace) before relying on the same-namespace guarantee.
 
 ---
 
@@ -414,10 +446,12 @@ If multiple namespaces need to target VMs on the same Proxmox cluster, co-locate
 
 | Item | Description |
 |------|-------------|
-| Watch | VRouterBinding, VRouterTarget, VRouterTemplate |
+| Watch | VRouterBinding, VRouterTarget, VRouterTemplate, VRouterParams |
 | Output | VRouterConfig (ownerRef + labels → VRouterBinding) |
 | Naming | `{binding-name}.{targetRef.name}` |
 | Cleanup | Binding deleted → ownerRef cascade delete (K8s GC, background); targetRef removed → label-based orphan cleanup |
+
+> **Note on VRouterTemplate/VRouterParams reconcilers**: both are pure data objects consumed only via BindingController's watches above — their own reconcilers (`VRouterTemplateReconciler`, `VRouterParamsReconciler`) are no-ops that exist solely to satisfy manager registration (`SetupWithManager`) and unconditionally return `ctrl.Result{}, nil`; all actual reconciliation of their content happens here in BindingController.
 
 Reconcile flow:
 
@@ -433,16 +467,17 @@ else:
 
 1. Resolve effective template list via `effectiveTemplateRefs()` (deprecated `templateRef` prepended to `templateRefs`)
 2. Lookup each template → get VRouterTemplate
-3. Lookup each `targetRef` → get VRouterTarget
-4. Merge params: `binding.params` → `target.params`
-5. Render and concatenate config/commands from templates in order
-6. Create/update VRouterConfig with:
+3. Lookup each `paramsRefs` entry, in list order → get VRouterParams (optional; an empty or absent list is valid and contributes no extra params layer)
+4. Lookup each `targetRef` → get VRouterTarget
+5. Merge params: `paramsRefs` (in list order) → `binding.params` → `target.params` (highest priority), via `MergeParamsLayers` (§4.1/§4.2)
+6. Render and concatenate config/commands from templates in order
+7. Create/update VRouterConfig with:
    - `ownerReference` → binding (for cascade delete via K8s GC)
    - `vrouter.kojuro.date/binding` label → binding name (for listing)
    - `vrouter.kojuro.date/target` label → target name (for listing)
    - `targetRef` set to the VRouterTarget name
-7. **Orphan cleanup**: list existing VRouterConfigs by label `vrouter.kojuro.date/binding={name}`, diff against desired set, delete orphans
-8. **Update status condition**: always update `Ready` condition before returning
+8. **Orphan cleanup**: list existing VRouterConfigs by label `vrouter.kojuro.date/binding={name}`, diff against desired set, delete orphans
+9. **Update status condition**: always update `Ready` condition before returning
    - success → `Ready=True`, reason=`ReconcileSucceeded`
    - any error → `Ready=False`, reason=`ReconcileError`, message=error string
 
@@ -781,7 +816,7 @@ rules:
   resources: ["virtualmachines", "virtualmachineinstances"]
   verbs: ["get", "list", "watch"]
 - apiGroups: ["vrouter.kojuro.date"]
-  resources: ["vrouterconfigs", "vroutertemplates",
+  resources: ["vrouterconfigs", "vroutertemplates", "vrouterparams",
               "vroutertargets", "vrouterbindings", "proxmoxclusters"]
   verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 - apiGroups: ["vrouter.kojuro.date"]
@@ -794,7 +829,7 @@ rules:
   verbs: ["update"]
 ```
 
-The `/finalizers` update rule is only needed for the three CRDs whose controllers add/remove a finalizer (VRouterConfig, VRouterBinding, ProxmoxCluster — see §7). VRouterTarget and VRouterTemplate have no finalizer logic (nothing owns cascade-deletable children through them), so they carry no `/finalizers` rule.
+The `/finalizers` update rule is only needed for the three CRDs whose controllers add/remove a finalizer (VRouterConfig, VRouterBinding, ProxmoxCluster — see §7). VRouterTarget, VRouterTemplate, and VRouterParams have no finalizer logic (nothing owns cascade-deletable children through them), so they carry no `/finalizers` rule. VRouterParams also has no status subresource, so it carries no `/status` rule either.
 
 ---
 
@@ -881,7 +916,12 @@ type VRouterBindingSpec struct {
     // later templates' config and commands are appended after earlier ones.
     // +optional
     TemplateRefs []NameRef `json:"templateRefs,omitempty"`
-    TargetRefs   []NameRef `json:"targetRefs"`
+    // ParamsRefs is an ordered list of VRouterParams to merge, same-namespace only.
+    // Later entries override earlier ones; the merged result is applied below
+    // (i.e. is overridden by) this binding's own Params.
+    // +optional
+    ParamsRefs []NameRef `json:"paramsRefs,omitempty"`
+    TargetRefs []NameRef `json:"targetRefs"`
     // Save controls whether the applied configuration is persisted, and is
     // propagated to the generated VRouterConfig.spec.save. Pointer bool so
     // an explicit `false` is honored — see VRouterConfigSpec.Save (§9.4).
@@ -1141,6 +1181,27 @@ const (
 
 QGA command templates: `CmdPing`, `CmdFileOpen`, `CmdFileWrite`, `CmdFileClose`, `CmdExecServiceSubState`, `CmdExecScript`, `CmdExecStatus`.
 
+### 9.12 VRouterParams Types
+
+```go
+//+kubebuilder:object:root=true
+//+kubebuilder:resource:shortName={vrtp,vrouterparams}
+type VRouterParams struct {
+    metav1.TypeMeta   `json:",inline"`
+    metav1.ObjectMeta `json:"metadata,omitempty"`
+    Spec VRouterParamsSpec `json:"spec,omitempty"`
+}
+
+type VRouterParamsSpec struct {
+    // +kubebuilder:pruning:PreserveUnknownFields
+    // +kubebuilder:validation:Schemaless
+    // +optional
+    Params apiextensionsv1.JSON `json:"params,omitempty"`
+}
+```
+
+VRouterParams has no `Status` type and no `+kubebuilder:subresource:status` marker — it is a pure data object, consumed only by BindingController (§7.1) via `VRouterBindingSpec.ParamsRefs` (§9.3) and merged with `MergeParamsLayers` (§4.1/§4.2).
+
 ---
 
 ## 10. CRD Relationship Diagram
@@ -1148,8 +1209,13 @@ QGA command templates: `CmdPing`, `CmdFileOpen`, `CmdFileWrite`, `CmdFileClose`,
 ```
 ProxmoxCluster ──clusterRef──→ VRouterTarget ←──targetRefs──  VRouterBinding ──templateRefs──→ VRouterTemplate(s)
 (endpoints +                   (provider + params)                    (combine + common params)    (template logic)
- credentials)                        │
-      │                              │
+ credentials)                        │                                │
+      │                              │                          paramsRefs
+      │                              │                                │
+      │                              │                                ▼
+      │                              │                          VRouterParams(s)
+      │                              │                          (lowest-priority params
+      │                              │                           layer, §4.1)
 ProxmoxCluster                BindingController
 Controller                    render per router
 (polls node                          │ ownerRef + targetRef label

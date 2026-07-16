@@ -55,6 +55,7 @@ Controller                    Controller
 | `VRouterTemplate` | `vrtt` | Go `text/template` config/command template |
 | `VRouterTarget` | `vrt` | Target VM + provider config + default params |
 | `VRouterBinding` | `vrb` | Binds a template to one or more targets |
+| `VRouterParams` | `vrtp` | Reusable, schemaless params block merged in via a binding's `paramsRefs` |
 | `VRouterConfig` | `vrc` | Final rendered config applied to one router (auto-generated or direct) |
 | `ProxmoxCluster` | `pxc` | Centralised Proxmox endpoint + credentials (Proxmox provider only) |
 
@@ -467,10 +468,10 @@ spec:
 
 ## Params Merge
 
-When a `VRouterBinding` has both `params` and its `VRouterTarget` has `params`, they are merged with **target params taking priority**:
+A `VRouterBinding` can also list `paramsRefs` — an ordered list of `VRouterParams` objects — alongside its own `params`, and its `VRouterTarget` can have `params` too. All three are merged with **target params taking priority**, then binding params, then paramsRefs (later entries in the list override earlier ones):
 
 ```
-final params = binding.params ← target.params
+final params = paramsRefs (in list order) ← binding.params ← target.params
 ```
 
 ---
@@ -479,8 +480,8 @@ final params = binding.params ← target.params
 
 The validating webhook enforces rules that the CRD schema alone can't express — see [docs/SPEC.md §6.2](docs/SPEC.md) for the full list. The most common ones you'll hit:
 
-- Every `templateRef`/`templateRefs`/`targetRefs`/`clusterRef` must point to an object that exists **in the same namespace** as the object referencing it — cross-namespace references are rejected.
-- A `VRouterTarget` cannot be deleted while any `VRouterBinding` or `VRouterConfig` in the same namespace still references it.
+- Every `templateRef`/`templateRefs`/`paramsRefs`/`targetRefs`/`clusterRef` must point to an object that exists **in the same namespace** as the object referencing it — cross-namespace references are rejected.
+- A `VRouterTarget` cannot be deleted while any `VRouterBinding` or `VRouterConfig` in the same namespace still references it; a `VRouterParams` cannot be deleted while any `VRouterBinding` in the same namespace still references it via `paramsRefs`.
 - `VRouterTemplate.spec.config`/`commands` must parse as valid `text/template` syntax at admission time, not just at render time.
 
 Webhooks require cert-manager for TLS (see [Installation](#installation)) and can be disabled with the `ENABLE_WEBHOOKS=false` environment variable (dev/testing only — disables all of the above validation). For Helm installs, set it via `--set controllerManager.manager.env[0].name=ENABLE_WEBHOOKS --set-string controllerManager.manager.env[0].value=false` (see [Common values overrides](#common-values-overrides)); for local development, run `ENABLE_WEBHOOKS=false go run ./cmd/main.go`.
