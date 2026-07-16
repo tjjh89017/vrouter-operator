@@ -62,6 +62,42 @@ spec:
                   - name
                   type: object
                 type: array
+              rollout:
+                description: |-
+                  Rollout controls whether binding-driven VRouterConfig updates across
+                  TargetRefs are staggered instead of all written in the same reconcile.
+                  Absent (nil) is equivalent to RolloutModeDisabled.
+                properties:
+                  mode:
+                    default: Disabled
+                    description: |-
+                      Mode selects the rollout strategy. Disabled (the default) preserves
+                      today's behavior of updating all targets in the same reconcile.
+                    enum:
+                    - Disabled
+                    - WaitForApplied
+                    - FixedInterval
+                    type: string
+                  pollInterval:
+                    default: 10s
+                    description: |-
+                      PollInterval is the requeue interval used while waiting for a target's
+                      generated VRouterConfig to reach Applied. Used by mode WaitForApplied.
+                    type: string
+                  waitAfterApplied:
+                    default: 0s
+                    description: |-
+                      WaitAfterApplied is an additional soak period to wait after a target's
+                      generated VRouterConfig reaches Applied before updating the next
+                      target. Used by mode WaitForApplied.
+                    type: string
+                  waitInterval:
+                    description: |-
+                      WaitInterval is the fixed wait period after each target update before
+                      updating the next target, regardless of Applied/Failed status. Used by
+                      mode FixedInterval; required (> 0) when that mode is selected.
+                    type: string
+                type: object
               save:
                 default: true
                 description: |-
@@ -172,6 +208,25 @@ spec:
                   - type
                   type: object
                 type: array
+              rollout:
+                description: |-
+                  Rollout records the serial rollout frontier: the last target whose
+                  generated VRouterConfig was written by the rollout walk, and when.
+                  Maintained by BindingController; only meaningful when spec.rollout.mode
+                  is not Disabled.
+                properties:
+                  lastUpdateTime:
+                    description: |-
+                      LastUpdateTime is when LastUpdatedTarget's generated VRouterConfig was
+                      most recently written by the rollout walk.
+                    format: date-time
+                    type: string
+                  lastUpdatedTarget:
+                    description: |-
+                      LastUpdatedTarget is the name of the target whose generated
+                      VRouterConfig was most recently written by the rollout walk.
+                    type: string
+                type: object
             type: object
         type: object
     served: true

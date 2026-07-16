@@ -100,3 +100,45 @@ func TestBoolValue(t *testing.T) {
 		})
 	}
 }
+
+func TestRolloutSpecEffectiveMode(t *testing.T) {
+	tests := []struct {
+		name string
+		r    *RolloutSpec
+		want string
+	}{
+		{
+			name: "nil rollout spec is Disabled",
+			r:    nil,
+			want: RolloutModeDisabled,
+		},
+		{
+			name: "empty rollout spec (mode unset) is Disabled",
+			r:    &RolloutSpec{},
+			want: RolloutModeDisabled,
+		},
+		{
+			name: "explicit Disabled mode stays Disabled",
+			r:    &RolloutSpec{Mode: RolloutModeDisabled},
+			want: RolloutModeDisabled,
+		},
+		{
+			name: "WaitForApplied mode is preserved",
+			r:    &RolloutSpec{Mode: RolloutModeWaitForApplied},
+			want: RolloutModeWaitForApplied,
+		},
+		{
+			name: "FixedInterval mode is preserved",
+			r:    &RolloutSpec{Mode: RolloutModeFixedInterval},
+			want: RolloutModeFixedInterval,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := tt.r.EffectiveMode()
+			if got != tt.want {
+				t.Errorf("EffectiveMode() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
