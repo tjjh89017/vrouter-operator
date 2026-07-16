@@ -115,6 +115,9 @@ var _ = BeforeSuite(func() {
 	err = SetupVRouterTargetWebhookWithManager(mgr)
 	Expect(err).NotTo(HaveOccurred())
 
+	err = SetupVRouterParamsWebhookWithManager(mgr)
+	Expect(err).NotTo(HaveOccurred())
+
 	err = SetupVRouterBindingWebhookWithManager(mgr)
 	Expect(err).NotTo(HaveOccurred())
 
