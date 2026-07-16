@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -639,6 +640,48 @@ func TestOnChange_FixedInterval_CrashBetweenStampAndWrite_RetriesSameTarget(t *t
 // both modes. The all-Failed halt and the three-state Ready/all-Applied
 // completion check are explicitly out of scope for this slice (next items).
 
+// markConfigFailed sets the generated VRouterConfig "b.<targetName>"'s
+// status.phase to Failed, simulating a failed apply (e.g. a non-zero exit
+// from the apply script, or the controller-side ApplyTimeout) for the issue
+// #35 "Error handling (WaitForApplied)" halt tests. It does not touch the
+// config's Spec -- callers that need the "spec differs" resume case update
+// the spec (via the source template/target) separately.
+func markConfigFailed(t *testing.T, cl client.Client, targetName string) { //nolint:unparam // every halt test in this file happens to fail "t0", but the helper stays general like markConfigApplied
+	t.Helper()
+	ctx := context.Background()
+	key := types.NamespacedName{Name: "b." + targetName, Namespace: "default"}
+
+	var cfg vrouterv1.VRouterConfig
+	if err := cl.Get(ctx, key, &cfg); err != nil {
+		t.Fatalf("get VRouterConfig b.%s: %v", targetName, err)
+	}
+	cfg.Status.Phase = vrouterv1.PhaseFailed
+	if err := cl.Status().Update(ctx, &cfg); err != nil {
+		t.Fatalf("update VRouterConfig b.%s status: %v", targetName, err)
+	}
+}
+
+// markConfigPending sets the generated VRouterConfig "b.<targetName>"'s
+// status.phase to Pending, simulating a target that is stuck (but not
+// Failed) forever -- e.g. the VM is stopped so the apply is skipped. Used by
+// the "stuck-but-not-Failed blocks indefinitely" test; distinct from the
+// zero-value phase left by createOrUpdateOne so the test exercises the same
+// phase a real controller would report.
+func markConfigPending(t *testing.T, cl client.Client, targetName string) {
+	t.Helper()
+	ctx := context.Background()
+	key := types.NamespacedName{Name: "b." + targetName, Namespace: "default"}
+
+	var cfg vrouterv1.VRouterConfig
+	if err := cl.Get(ctx, key, &cfg); err != nil {
+		t.Fatalf("get VRouterConfig b.%s: %v", targetName, err)
+	}
+	cfg.Status.Phase = vrouterv1.PhasePending
+	if err := cl.Status().Update(ctx, &cfg); err != nil {
+		t.Fatalf("update VRouterConfig b.%s status: %v", targetName, err)
+	}
+}
+
 // TestOnChange_WaitForApplied_PollsUntilAppliedThenAdvances is the primary
 // WaitForApplied walk test: it drives a fresh 2-target rollout end to end,
 // pinning (a) only target[0] is written on the first reconcile, with the
@@ -976,5 +1019,388 @@ func TestOnChange_WaitForApplied_FrontierEvictedFromTargetRefs_TimeDegradedGate(
 	}
 	if binding.Status.Rollout.LastUpdatedTarget != "t1" {
 		t.Errorf("reconcile 3: frontier = %q, want t1", binding.Status.Rollout.LastUpdatedTarget)
+	}
+}
+
+// These tests cover the issue #35 "Error handling (WaitForApplied)" any-
+// Failed halt: firstHaltingFailedConfig plus its wiring at the top of
+// runRollout. The three-state Ready completion overhaul (all-Applied
+// verification at walk completion) is explicitly out of scope here -- these
+// tests only pin the halt/resume mechanics.
+
+// TestOnChange_WaitForApplied_HaltsWhenFrontierFails pins the primary halt
+// path: the frontier target's generated VRouterConfig flips to Failed
+// mid-rollout, so the next reconcile must write nothing, set
+// Ready=False/RolloutHalted naming the failed config, and requeue at
+// exactly pollInterval (an observe-only requeue, not a retry).
+func TestOnChange_WaitForApplied_HaltsWhenFrontierFails(t *testing.T) {
+	t0, t1 := rolloutTarget("t0"), rolloutTarget("t1")
+	tmpl := rolloutTemplate("cfg")
+	pollInterval := 10 * time.Second
+	binding := rolloutBinding([]string{"t0", "t1"}, &vrouterv1.RolloutSpec{
+		Mode:         vrouterv1.RolloutModeWaitForApplied,
+		PollInterval: metav1.Duration{Duration: pollInterval},
+	})
+
+	cl, scheme := newRolloutFixture(t, t0, t1, tmpl, binding)
+	r := &VRouterBindingReconciler{Client: cl, Scheme: scheme}
+	ctx := context.Background()
+
+	if _, err := r.onChange(ctx, reconcile.Request{}, binding); err != nil {
+		t.Fatalf("reconcile 1: %v", err)
+	}
+	if binding.Status.Rollout.LastUpdatedTarget != "t0" {
+		t.Fatalf("setup: frontier = %q, want t0", binding.Status.Rollout.LastUpdatedTarget)
+	}
+
+	markConfigFailed(t, cl, "t0")
+
+	result, err := r.onChange(ctx, reconcile.Request{}, binding)
+	if err != nil {
+		t.Fatalf("reconcile 2: onChange returned error: %v", err)
+	}
+	if result.RequeueAfter != pollInterval {
+		t.Errorf("reconcile 2: RequeueAfter = %v, want %v (observe-only requeue)", result.RequeueAfter, pollInterval)
+	}
+	if _, ok := getConfig(t, cl, "t1"); ok {
+		t.Error("reconcile 2: VRouterConfig for t1 was written despite the halt")
+	}
+	cond := readyCondition(binding)
+	if cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != ReasonRolloutHalted {
+		t.Fatalf("reconcile 2: Ready condition = %+v, want False/RolloutHalted", cond)
+	}
+	if !strings.Contains(cond.Message, "b.t0") {
+		t.Errorf("reconcile 2: Ready message = %q, want it to name the failed config b.t0", cond.Message)
+	}
+	if binding.Status.Rollout.LastUpdatedTarget != "t0" {
+		t.Errorf("reconcile 2: frontier = %q, want it unchanged (no stamp on halt)", binding.Status.Rollout.LastUpdatedTarget)
+	}
+}
+
+// TestOnChange_WaitForApplied_HaltsWhenEarlierCompletedTargetFails pins that
+// the halt scan covers every desired target, not just the current frontier:
+// a target completed earlier in the walk that later flips to Failed (e.g. a
+// reboot-forced re-apply gone wrong) halts the rollout the moment the walk
+// sees it, even though the frontier has already moved past it.
+func TestOnChange_WaitForApplied_HaltsWhenEarlierCompletedTargetFails(t *testing.T) {
+	t0, t1, t2 := rolloutTarget("t0"), rolloutTarget("t1"), rolloutTarget("t2")
+	tmpl := rolloutTemplate("cfg")
+	pollInterval := 10 * time.Second
+	binding := rolloutBinding([]string{"t0", "t1", "t2"}, &vrouterv1.RolloutSpec{
+		Mode:         vrouterv1.RolloutModeWaitForApplied,
+		PollInterval: metav1.Duration{Duration: pollInterval},
+	})
+
+	cl, scheme := newRolloutFixture(t, t0, t1, t2, tmpl, binding)
+	r := &VRouterBindingReconciler{Client: cl, Scheme: scheme}
+	ctx := context.Background()
+
+	// Advance the rollout to frontier=t1 (t0 already written and Applied).
+	if _, err := r.onChange(ctx, reconcile.Request{}, binding); err != nil {
+		t.Fatalf("reconcile 1: %v", err)
+	}
+	markConfigApplied(t, cl, "t0", time.Now())
+	if _, err := r.onChange(ctx, reconcile.Request{}, binding); err != nil {
+		t.Fatalf("reconcile 2: %v", err)
+	}
+	if binding.Status.Rollout.LastUpdatedTarget != "t1" {
+		t.Fatalf("setup: frontier = %q, want t1", binding.Status.Rollout.LastUpdatedTarget)
+	}
+
+	// t0 (completed earlier, spec unchanged) flips to Failed.
+	markConfigFailed(t, cl, "t0")
+
+	result, err := r.onChange(ctx, reconcile.Request{}, binding)
+	if err != nil {
+		t.Fatalf("reconcile 3: onChange returned error: %v", err)
+	}
+	if result.RequeueAfter != pollInterval {
+		t.Errorf("reconcile 3: RequeueAfter = %v, want %v", result.RequeueAfter, pollInterval)
+	}
+	if _, ok := getConfig(t, cl, "t2"); ok {
+		t.Error("reconcile 3: VRouterConfig for t2 was written despite the halt")
+	}
+	cond := readyCondition(binding)
+	if cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != ReasonRolloutHalted {
+		t.Fatalf("reconcile 3: Ready condition = %+v, want False/RolloutHalted", cond)
+	}
+	if !strings.Contains(cond.Message, "b.t0") {
+		t.Errorf("reconcile 3: Ready message = %q, want it to name the failed config b.t0", cond.Message)
+	}
+	if binding.Status.Rollout.LastUpdatedTarget != "t1" {
+		t.Errorf("reconcile 3: frontier = %q, want it unchanged (no stamp on halt)", binding.Status.Rollout.LastUpdatedTarget)
+	}
+}
+
+// TestOnChange_WaitForApplied_ResumesWhenFailedConfigRecoversToApplied pins
+// the first documented resume path: once the halting Failed config recovers
+// to Applied (for its current generation), the very next reconcile proceeds
+// normally and writes the next target -- the halt is not a terminal state.
+func TestOnChange_WaitForApplied_ResumesWhenFailedConfigRecoversToApplied(t *testing.T) {
+	t0, t1 := rolloutTarget("t0"), rolloutTarget("t1")
+	tmpl := rolloutTemplate("cfg")
+	pollInterval := 10 * time.Second
+	binding := rolloutBinding([]string{"t0", "t1"}, &vrouterv1.RolloutSpec{
+		Mode:         vrouterv1.RolloutModeWaitForApplied,
+		PollInterval: metav1.Duration{Duration: pollInterval},
+	})
+
+	cl, scheme := newRolloutFixture(t, t0, t1, tmpl, binding)
+	r := &VRouterBindingReconciler{Client: cl, Scheme: scheme}
+	ctx := context.Background()
+
+	if _, err := r.onChange(ctx, reconcile.Request{}, binding); err != nil {
+		t.Fatalf("reconcile 1: %v", err)
+	}
+	markConfigFailed(t, cl, "t0")
+	if _, err := r.onChange(ctx, reconcile.Request{}, binding); err != nil {
+		t.Fatalf("reconcile 2: %v", err)
+	}
+	if cond := readyCondition(binding); cond == nil || cond.Reason != ReasonRolloutHalted {
+		t.Fatalf("setup: Ready condition = %+v, want RolloutHalted before recovery", cond)
+	}
+
+	// t0 recovers to Applied for its current (unchanged) generation.
+	markConfigApplied(t, cl, "t0", time.Now())
+
+	result, err := r.onChange(ctx, reconcile.Request{}, binding)
+	if err != nil {
+		t.Fatalf("reconcile 3: onChange returned error: %v", err)
+	}
+	if result.RequeueAfter != pollInterval {
+		t.Errorf("reconcile 3: RequeueAfter = %v, want %v", result.RequeueAfter, pollInterval)
+	}
+	if _, ok := getConfig(t, cl, "t1"); !ok {
+		t.Fatal("reconcile 3: VRouterConfig for t1 was not written after t0 recovered to Applied")
+	}
+	if binding.Status.Rollout.LastUpdatedTarget != "t1" {
+		t.Fatalf("reconcile 3: frontier = %q, want t1 (rollout resumed and advanced)", binding.Status.Rollout.LastUpdatedTarget)
+	}
+	cond := readyCondition(binding)
+	if cond == nil || cond.Reason != ReasonRolloutInProgress {
+		t.Errorf("reconcile 3: Ready condition = %+v, want RolloutInProgress (no longer Halted)", cond)
+	}
+}
+
+// TestOnChange_WaitForApplied_ReRenderChangingFailedConfigSpec_ResumesByOverwriting
+// pins the second documented resume path: a new render that changes the
+// FAILED config's own spec becomes a first mismatch and is overwritten
+// directly, without waiting for the (still Failed) config to recover on its
+// own. This is the case the pre-walk halt check must NOT block -- the spec
+// no longer matches, so firstHaltingFailedConfig must skip it, and since the
+// mismatched target is also the current frontier, the universal write gate's
+// "first mismatch IS the frontier itself" rule lets the write through with
+// no wait.
+func TestOnChange_WaitForApplied_ReRenderChangingFailedConfigSpec_ResumesByOverwriting(t *testing.T) {
+	t0, t1 := rolloutTarget("t0"), rolloutTarget("t1")
+	tmpl := rolloutTemplate("cfg")
+	pollInterval := 10 * time.Second
+	binding := rolloutBinding([]string{"t0", "t1"}, &vrouterv1.RolloutSpec{
+		Mode:         vrouterv1.RolloutModeWaitForApplied,
+		PollInterval: metav1.Duration{Duration: pollInterval},
+	})
+
+	cl, scheme := newRolloutFixture(t, t0, t1, tmpl, binding)
+	r := &VRouterBindingReconciler{Client: cl, Scheme: scheme}
+	ctx := context.Background()
+
+	if _, err := r.onChange(ctx, reconcile.Request{}, binding); err != nil {
+		t.Fatalf("reconcile 1: %v", err)
+	}
+	if binding.Status.Rollout.LastUpdatedTarget != "t0" {
+		t.Fatalf("setup: frontier = %q, want t0", binding.Status.Rollout.LastUpdatedTarget)
+	}
+	markConfigFailed(t, cl, "t0")
+	if _, err := r.onChange(ctx, reconcile.Request{}, binding); err != nil {
+		t.Fatalf("reconcile 2: %v", err)
+	}
+	if cond := readyCondition(binding); cond == nil || cond.Reason != ReasonRolloutHalted {
+		t.Fatalf("setup: Ready condition = %+v, want RolloutHalted before the fix", cond)
+	}
+
+	// The user fixes t0's own render input (not the shared template, so t1's
+	// desired spec is untouched) and t0's own desired spec now changes.
+	t0.Spec.Params = apiextensionsv1.JSON{Raw: []byte(`{"x":"y"}`)}
+	if err := cl.Update(ctx, t0); err != nil {
+		t.Fatalf("update t0: %v", err)
+	}
+	tmpl.Spec.Config = "cfg {{ .x }}"
+	if err := cl.Update(ctx, tmpl); err != nil {
+		t.Fatalf("update template: %v", err)
+	}
+
+	result, err := r.onChange(ctx, reconcile.Request{}, binding)
+	if err != nil {
+		t.Fatalf("reconcile 3: onChange returned error: %v", err)
+	}
+	if result.RequeueAfter != pollInterval {
+		t.Errorf("reconcile 3: RequeueAfter = %v, want %v (write proceeded, not the halt requeue)", result.RequeueAfter, pollInterval)
+	}
+	cfg, ok := getConfig(t, cl, "t0")
+	if !ok {
+		t.Fatal("reconcile 3: t0 config missing")
+	}
+	if cfg.Spec.Config != "cfg y" {
+		t.Errorf("reconcile 3: t0 config = %q, want the new render \"cfg y\" overwritten directly", cfg.Spec.Config)
+	}
+	if binding.Status.Rollout.LastUpdatedTarget != "t0" {
+		t.Errorf("reconcile 3: frontier = %q, want it to stay t0", binding.Status.Rollout.LastUpdatedTarget)
+	}
+	cond := readyCondition(binding)
+	if cond == nil || cond.Reason != ReasonRolloutInProgress {
+		t.Errorf("reconcile 3: Ready condition = %+v, want RolloutInProgress (no longer Halted)", cond)
+	}
+}
+
+// TestOnChange_WaitForApplied_ReRenderChangingOnlyOtherTarget_StaysHalted
+// pins the precise boundary the issue calls out: a new render that changes
+// only OTHER targets' specs does NOT resume the rollout -- the halting
+// Failed config's own spec is unchanged, so firstHaltingFailedConfig still
+// halts on it and no target is written, even the other target whose desired
+// spec did change.
+func TestOnChange_WaitForApplied_ReRenderChangingOnlyOtherTarget_StaysHalted(t *testing.T) {
+	t0, t1 := rolloutTarget("t0"), rolloutTarget("t1")
+	// The template references a param only t1 will ever set, so t0's
+	// rendered spec never changes regardless of what happens to t1.
+	tmpl := rolloutTemplate("cfg {{ .y }}")
+	pollInterval := 10 * time.Second
+	binding := rolloutBinding([]string{"t0", "t1"}, &vrouterv1.RolloutSpec{
+		Mode:         vrouterv1.RolloutModeWaitForApplied,
+		PollInterval: metav1.Duration{Duration: pollInterval},
+	})
+
+	cl, scheme := newRolloutFixture(t, t0, t1, tmpl, binding)
+	r := &VRouterBindingReconciler{Client: cl, Scheme: scheme}
+	ctx := context.Background()
+
+	if _, err := r.onChange(ctx, reconcile.Request{}, binding); err != nil {
+		t.Fatalf("reconcile 1: %v", err)
+	}
+	if binding.Status.Rollout.LastUpdatedTarget != "t0" {
+		t.Fatalf("setup: frontier = %q, want t0", binding.Status.Rollout.LastUpdatedTarget)
+	}
+	markConfigFailed(t, cl, "t0")
+	if _, err := r.onChange(ctx, reconcile.Request{}, binding); err != nil {
+		t.Fatalf("reconcile 2: %v", err)
+	}
+	if cond := readyCondition(binding); cond == nil || cond.Reason != ReasonRolloutHalted {
+		t.Fatalf("setup: Ready condition = %+v, want RolloutHalted", cond)
+	}
+
+	// Re-render: only t1's own params change. t0's desired spec is untouched.
+	t1.Spec.Params = apiextensionsv1.JSON{Raw: []byte(`{"y":"new"}`)}
+	if err := cl.Update(ctx, t1); err != nil {
+		t.Fatalf("update t1: %v", err)
+	}
+
+	result, err := r.onChange(ctx, reconcile.Request{}, binding)
+	if err != nil {
+		t.Fatalf("reconcile 3: onChange returned error: %v", err)
+	}
+	if result.RequeueAfter != pollInterval {
+		t.Errorf("reconcile 3: RequeueAfter = %v, want %v (still the halt requeue)", result.RequeueAfter, pollInterval)
+	}
+	if _, ok := getConfig(t, cl, "t1"); ok {
+		t.Error("reconcile 3: VRouterConfig for t1 was written despite the halt (only t1's spec changed, t0 is still halting)")
+	}
+	cond := readyCondition(binding)
+	if cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != ReasonRolloutHalted {
+		t.Fatalf("reconcile 3: Ready condition = %+v, want it to remain False/RolloutHalted", cond)
+	}
+	if binding.Status.Rollout.LastUpdatedTarget != "t0" {
+		t.Errorf("reconcile 3: frontier = %q, want it unchanged (no write happened)", binding.Status.Rollout.LastUpdatedTarget)
+	}
+}
+
+// TestOnChange_FixedInterval_FailedConfigDoesNotHaltRollout pins that the
+// any-Failed halt is WaitForApplied-only: mode: FixedInterval ignores
+// Failed by definition and proceeds purely on the time gate, exactly as
+// before this change.
+func TestOnChange_FixedInterval_FailedConfigDoesNotHaltRollout(t *testing.T) {
+	t0, t1 := rolloutTarget("t0"), rolloutTarget("t1")
+	tmpl := rolloutTemplate("cfg")
+	waitInterval := time.Hour
+	binding := rolloutBinding([]string{"t0", "t1"}, &vrouterv1.RolloutSpec{
+		Mode:         vrouterv1.RolloutModeFixedInterval,
+		WaitInterval: metav1.Duration{Duration: waitInterval},
+	})
+
+	cl, scheme := newRolloutFixture(t, t0, t1, tmpl, binding)
+	r := &VRouterBindingReconciler{Client: cl, Scheme: scheme}
+	ctx := context.Background()
+
+	if _, err := r.onChange(ctx, reconcile.Request{}, binding); err != nil {
+		t.Fatalf("reconcile 1: %v", err)
+	}
+	if binding.Status.Rollout.LastUpdatedTarget != "t0" {
+		t.Fatalf("setup: frontier = %q, want t0", binding.Status.Rollout.LastUpdatedTarget)
+	}
+
+	markConfigFailed(t, cl, "t0")
+	backdateFrontier(t, cl, binding, 2*waitInterval)
+
+	result, err := r.onChange(ctx, reconcile.Request{}, binding)
+	if err != nil {
+		t.Fatalf("reconcile 2: onChange returned error: %v", err)
+	}
+	if result.RequeueAfter != waitInterval {
+		t.Errorf("reconcile 2: RequeueAfter = %v, want %v (time gate, not the halt requeue)", result.RequeueAfter, waitInterval)
+	}
+	if _, ok := getConfig(t, cl, "t1"); !ok {
+		t.Fatal("reconcile 2: VRouterConfig for t1 was not written -- FixedInterval must not halt on a Failed config")
+	}
+	if binding.Status.Rollout.LastUpdatedTarget != "t1" {
+		t.Errorf("reconcile 2: frontier = %q, want t1 (rollout proceeded past the Failed t0)", binding.Status.Rollout.LastUpdatedTarget)
+	}
+	if cond := readyCondition(binding); cond == nil || cond.Reason == ReasonRolloutHalted {
+		t.Errorf("reconcile 2: Ready condition = %+v, want it never RolloutHalted in FixedInterval mode", cond)
+	}
+}
+
+// TestOnChange_WaitForApplied_PendingForeverFrontier_BlocksIndefinitely pins
+// the "stuck-but-not-Failed" case: a frontier config that never reaches
+// Applied and never flips to Failed (e.g. the VM is stopped, so the apply is
+// skipped and the config stays Pending forever) blocks the rollout
+// indefinitely via the normal frontier wait -- it requeues at pollInterval,
+// writes nothing, and Ready stays RolloutInProgress, never RolloutHalted.
+func TestOnChange_WaitForApplied_PendingForeverFrontier_BlocksIndefinitely(t *testing.T) {
+	t0, t1 := rolloutTarget("t0"), rolloutTarget("t1")
+	tmpl := rolloutTemplate("cfg")
+	pollInterval := 10 * time.Second
+	binding := rolloutBinding([]string{"t0", "t1"}, &vrouterv1.RolloutSpec{
+		Mode:         vrouterv1.RolloutModeWaitForApplied,
+		PollInterval: metav1.Duration{Duration: pollInterval},
+	})
+
+	cl, scheme := newRolloutFixture(t, t0, t1, tmpl, binding)
+	r := &VRouterBindingReconciler{Client: cl, Scheme: scheme}
+	ctx := context.Background()
+
+	if _, err := r.onChange(ctx, reconcile.Request{}, binding); err != nil {
+		t.Fatalf("reconcile 1: %v", err)
+	}
+	if binding.Status.Rollout.LastUpdatedTarget != "t0" {
+		t.Fatalf("setup: frontier = %q, want t0", binding.Status.Rollout.LastUpdatedTarget)
+	}
+	markConfigPending(t, cl, "t0")
+
+	for i := 0; i < 3; i++ {
+		result, err := r.onChange(ctx, reconcile.Request{}, binding)
+		if err != nil {
+			t.Fatalf("reconcile %d: onChange returned error: %v", i+2, err)
+		}
+		if result.RequeueAfter != pollInterval {
+			t.Errorf("reconcile %d: RequeueAfter = %v, want %v", i+2, result.RequeueAfter, pollInterval)
+		}
+		if _, ok := getConfig(t, cl, "t1"); ok {
+			t.Errorf("reconcile %d: VRouterConfig for t1 was written despite t0 being stuck Pending", i+2)
+		}
+		cond := readyCondition(binding)
+		if cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != ReasonRolloutInProgress {
+			t.Errorf("reconcile %d: Ready condition = %+v, want False/RolloutInProgress (not Halted)", i+2, cond)
+		}
+		if binding.Status.Rollout.LastUpdatedTarget != "t0" {
+			t.Errorf("reconcile %d: frontier = %q, want it unchanged", i+2, binding.Status.Rollout.LastUpdatedTarget)
+		}
 	}
 }

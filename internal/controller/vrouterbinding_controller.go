@@ -44,6 +44,11 @@ import (
 // completion.
 const ReasonRolloutInProgress = "RolloutInProgress"
 
+// ReasonRolloutHalted is the Ready=False condition reason set when
+// mode: WaitForApplied halts because some generated VRouterConfig is Failed
+// (see issue #35 "Error handling (WaitForApplied)").
+const ReasonRolloutHalted = "RolloutHalted"
+
 // VRouterBindingReconciler reconciles a VRouterBinding object.
 type VRouterBindingReconciler struct {
 	client.Client
@@ -436,6 +441,39 @@ func (r *VRouterBindingReconciler) stampRolloutFrontier(ctx context.Context, bin
 	return r.Status().Patch(ctx, binding, patch)
 }
 
+// firstHaltingFailedConfig scans desired in targetRefs order and returns the
+// first generated VRouterConfig that is Failed AND whose existing spec
+// already matches the desired render for its target -- the halting
+// condition for mode: WaitForApplied (see issue #35 "Error handling
+// (WaitForApplied)"). The scan covers every desired target, not just the
+// frontier, so a completed earlier target that later flips to Failed halts
+// the rollout the moment the walk sees it, exactly like a Failed frontier.
+//
+// A Failed config whose spec differs from the new render is deliberately
+// NOT treated as halting: that is the documented resume path ("a new render
+// changes the failed config's spec ... it becomes a first mismatch and is
+// overwritten directly"). The normal first-mismatch walk picks it up like
+// any other write, gated by gateRemaining exactly as usual -- if it happens
+// to be the current frontier, gateRemaining's "first mismatch IS the
+// frontier itself" case lets it through immediately.
+func (r *VRouterBindingReconciler) firstHaltingFailedConfig(ctx context.Context, binding *vrouterv1.VRouterBinding, desired []desiredConfig) (*vrouterv1.VRouterConfig, error) {
+	for _, d := range desired {
+		existing, err := r.getExistingConfig(ctx, binding, d.Name)
+		if err != nil {
+			return nil, err
+		}
+		if existing == nil || existing.Status.Phase != vrouterv1.PhaseFailed {
+			continue
+		}
+		if !equality.Semantic.DeepEqual(existing.Spec, d.Spec) {
+			// Spec changed for this Failed config: resume path, not a halt.
+			continue
+		}
+		return existing, nil
+	}
+	return nil, nil
+}
+
 // runRollout implements the serial "update only the first mismatch per
 // reconcile" walk shared by mode: FixedInterval and mode: WaitForApplied (see
 // issue #35: "Reuses the phase-1 skeleton unchanged" for Phase 2). It visits
@@ -452,6 +490,26 @@ func (r *VRouterBindingReconciler) runRollout(ctx context.Context, binding *vrou
 	mode := binding.Spec.Rollout.EffectiveMode()
 	now := r.now()
 	frontier := binding.Status.Rollout
+
+	// Any-Failed halt (WaitForApplied only, per issue #35 "Error handling
+	// (WaitForApplied)"): checked before the walk writes anything. FixedInterval
+	// ignores Failed by definition -- a failed target does not stop that mode's
+	// rollout, so this check is skipped entirely there.
+	if mode == vrouterv1.RolloutModeWaitForApplied {
+		failed, err := r.firstHaltingFailedConfig(ctx, binding, desired)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if failed != nil {
+			// Halt: no config writes, no frontier stamp, no apply re-dispatch.
+			// Requeue at pollInterval purely to observe recovery -- config-level
+			// Failed has no auto-retry, so this never re-dispatches the failed
+			// apply itself.
+			message := fmt.Sprintf("VRouterConfig %q is Failed", failed.Name)
+			r.setReadyCondition(ctx, binding, metav1.ConditionFalse, ReasonRolloutHalted, message)
+			return ctrl.Result{RequeueAfter: binding.Spec.Rollout.PollInterval.Duration}, nil
+		}
+	}
 
 	for i, d := range desired {
 		existing, err := r.getExistingConfig(ctx, binding, d.Name)
