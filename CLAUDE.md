@@ -51,6 +51,12 @@ make build-installer IMG=<image>
 #     vrouter-operator.webhookServiceName helper in _helpers.tpl (trunc-63 guard)
 #   - values.yaml + deployment.yaml: manager `env` list so operators can set
 #     e.g. ENABLE_WEBHOOKS=false (helmify does not generate it)
+#   - values.yaml + deployment.yaml: manager `imagePullPolicy` field wired to
+#     the container spec (helmify does not generate it)
+#   - values.yaml + deployment.yaml: top-level `imagePullSecrets: []` rendered
+#     into the pod spec via `with` (helmify does not generate it)
+#   - values.yaml + deployment.yaml: `image.tag` defaults to `""` and falls
+#     back to `.Chart.AppVersion` in the template, not a hardcoded `latest`
 bin/kustomize build config/default | helmify charts/vrouter-operator
 helm package charts/vrouter-operator  # → vrouter-operator-<version>.tgz
 ```
