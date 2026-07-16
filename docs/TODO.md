@@ -106,7 +106,7 @@ BindingController already watches VRouterTarget and will re-reconcile on health 
 
 ## `commands` Interpolation Trust Boundary
 
-**Problem**: `VRouterTemplate.spec.config` and `spec.commands` are both Go templates rendered against the same merged params (`MergeParams(binding.Spec.Params, target.Spec.Params)`, target overrides binding — SPEC §4.1), but the two rendered outputs are embedded very differently in the generated apply script (SPEC §7.4, `internal/provider/qga/script.go`):
+**Problem**: `VRouterTemplate.spec.config` and `spec.commands` are both Go templates rendered against the same merged params (`MergeParamsLayers`: `paramsRefs` in list order, then `binding.Spec.Params`, then `target.Spec.Params`, later layers override — SPEC §4.1), but the two rendered outputs are embedded very differently in the generated apply script (SPEC §7.4, `internal/provider/qga/script.go`):
 
 - `config` is written inside `load /dev/stdin <<'{{ .Delimiter }}'` — a quoted heredoc with a randomized per-render delimiter (`crypto/rand`-backed, SPEC §7.4). It is always treated as **data**, never as shell syntax, regardless of what a param value contains.
 - `commands` is spliced into the script **verbatim** as executable vbash statements, with no quoting or escaping. This is by design — `commands` exists precisely so template authors can emit `set ...`/`delete ...` (and arbitrary vbash) lines. But it means any param value interpolated into a `commands` template becomes literal shell/vbash text: a param such as `foo; rm -rf /` or one containing backticks/`$( )` executes as written, as root, inside the router (the `sg vyattacfg` re-exec in the script template runs with the config-mode group, not as an unprivileged user).
@@ -128,7 +128,7 @@ renders to a `commands` block that deletes the interface and commits, instead of
 | Heredoc randomized delimiter (`internal/provider/qga/script.go`) | `config` breaking out of its heredoc | `commands`, which was never inside a heredoc — it is meant to run as shell, so there is no data/code boundary to protect |
 | Same-namespace-only reference policy (SPEC §6.2 "Same-namespace-only references") | Confused-deputy access to another namespace's targets/credentials | Params supplied by a same-namespace, lower-privileged `VRouterBinding`/`VRouterTarget` author who is not trusted to run arbitrary vbash on the router |
 
-Net effect: **anyone who can set `binding.spec.params` or `target.spec.params`** (not just `VRouterTemplate` authors) can inject arbitrary vbash if any `commands` template in the chain interpolates that param, even though `VRouterTemplate` is typically the more privileged/reviewed resource and `VRouterBinding`/`VRouterTarget` are typically edited more freely per-deployment.
+Net effect: **anyone who can set `binding.spec.params`, `target.spec.params`, or the params of a `VRouterParams` referenced via `binding.spec.paramsRefs`** (not just `VRouterTemplate` authors) can inject arbitrary vbash if any `commands` template in the chain interpolates that param, even though `VRouterTemplate` is typically the more privileged/reviewed resource and `VRouterBinding`/`VRouterTarget` are typically edited more freely per-deployment.
 
 ### Mitigation Options
 
