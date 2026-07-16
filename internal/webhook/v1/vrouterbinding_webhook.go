@@ -170,6 +170,22 @@ func validateBinding(ctx context.Context, cl client.Client, binding *vrouterv1.V
 		}
 	}
 
+	// Verify each paramsRefs entry exists. paramsRefs is optional: an empty
+	// list is valid and simply skips this loop.
+	for i, ref := range binding.Spec.ParamsRefs {
+		var params vrouterv1.VRouterParams
+		ns := vrouterv1.ResolveNamespace(ref, binding.Namespace)
+		if ns != binding.Namespace {
+			return fmt.Errorf("cross-namespace reference not allowed: spec.paramsRefs[%d] may only reference the same namespace", i)
+		}
+		if err := cl.Get(ctx, types.NamespacedName{Namespace: ns, Name: ref.Name}, &params); err != nil {
+			if apierrors.IsNotFound(err) {
+				return fmt.Errorf("spec.paramsRefs[%d] %q (namespace %q) not found", i, ref.Name, ns)
+			}
+			return fmt.Errorf("get paramsRefs[%d] %q: %w", i, ref.Name, err)
+		}
+	}
+
 	// Verify each targetRef exists.
 	for i, ref := range binding.Spec.TargetRefs {
 		var target vrouterv1.VRouterTarget
