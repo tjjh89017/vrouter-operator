@@ -41,9 +41,11 @@ import (
 // backward directly through the status subresource to fast-forward the
 // walk's time gates without sleeping.
 
-// newRolloutFixture builds a fake client (with the VRouterBinding status
-// subresource enabled, as the rollout walk relies on) and returns it along
-// with the scheme the reconciler needs for SetControllerReference.
+// newRolloutFixture builds a fake client (with the VRouterBinding and
+// VRouterConfig status subresources enabled -- the latter so tests can drive
+// a generated VRouterConfig's Generation/Applied condition directly, the way
+// the real apiserver + config controller would) and returns it along with
+// the scheme the reconciler needs for SetControllerReference.
 func newRolloutFixture(t *testing.T, objs ...client.Object) (client.Client, *runtime.Scheme) {
 	t.Helper()
 	scheme := runtime.NewScheme()
@@ -53,7 +55,7 @@ func newRolloutFixture(t *testing.T, objs ...client.Object) (client.Client, *run
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithObjects(objs...).
-		WithStatusSubresource(&vrouterv1.VRouterBinding{}).
+		WithStatusSubresource(&vrouterv1.VRouterBinding{}, &vrouterv1.VRouterConfig{}).
 		Build()
 	return cl, scheme
 }
@@ -128,6 +130,57 @@ func backdateFrontier(t *testing.T, cl client.Client, binding *vrouterv1.VRouter
 	if err := cl.Status().Update(context.Background(), binding); err != nil {
 		t.Fatalf("backdate frontier: %v", err)
 	}
+}
+
+// markConfigAppliedForGeneration sets the generated VRouterConfig
+// "b.<targetName>"'s Generation to currentGeneration and stamps an Applied
+// condition True with the given appliedGeneration and transitionTime. The
+// fake client (unlike a real apiserver) never increments Generation on a
+// spec update, so tests drive it directly to model both the common case
+// (appliedGeneration == currentGeneration: Applied for the current render)
+// and the stale case (appliedGeneration < currentGeneration: a True Applied
+// condition left over from before a re-render bumped the generation, which
+// must NOT count as "Applied for the current generation").
+func markConfigAppliedForGeneration(t *testing.T, cl client.Client, targetName string, currentGeneration, appliedGeneration int64, transitionTime time.Time) {
+	t.Helper()
+	ctx := context.Background()
+	key := types.NamespacedName{Name: "b." + targetName, Namespace: "default"}
+
+	var cfg vrouterv1.VRouterConfig
+	if err := cl.Get(ctx, key, &cfg); err != nil {
+		t.Fatalf("get VRouterConfig b.%s: %v", targetName, err)
+	}
+	cfg.Generation = currentGeneration
+	if err := cl.Update(ctx, &cfg); err != nil {
+		t.Fatalf("update VRouterConfig b.%s generation: %v", targetName, err)
+	}
+
+	if err := cl.Get(ctx, key, &cfg); err != nil {
+		t.Fatalf("re-get VRouterConfig b.%s: %v", targetName, err)
+	}
+	cfg.Status.Phase = vrouterv1.PhaseApplied
+	cfg.Status.ObservedGeneration = appliedGeneration
+	cfg.Status.Conditions = []metav1.Condition{
+		{
+			Type:               vrouterv1.ConditionApplied,
+			Status:             metav1.ConditionTrue,
+			Reason:             "ConfigApplied",
+			Message:            "Configuration applied successfully.",
+			ObservedGeneration: appliedGeneration,
+			LastTransitionTime: metav1.NewTime(transitionTime),
+		},
+	}
+	if err := cl.Status().Update(ctx, &cfg); err != nil {
+		t.Fatalf("update VRouterConfig b.%s status: %v", targetName, err)
+	}
+}
+
+// markConfigApplied is the common-case convenience wrapper around
+// markConfigAppliedForGeneration: the Applied condition matches the config's
+// own (default zero) Generation, i.e. "Applied for the current generation".
+func markConfigApplied(t *testing.T, cl client.Client, targetName string, transitionTime time.Time) {
+	t.Helper()
+	markConfigAppliedForGeneration(t, cl, targetName, 0, 0, transitionTime)
 }
 
 // TestOnChange_RolloutDisabled_WritesAllTargetsInOnePass pins that both an
@@ -577,5 +630,351 @@ func TestOnChange_FixedInterval_CrashBetweenStampAndWrite_RetriesSameTarget(t *t
 	}
 	if binding.Status.Rollout.LastUpdatedTarget != "t0" {
 		t.Errorf("frontier = %q, want it to stay t0", binding.Status.Rollout.LastUpdatedTarget)
+	}
+}
+
+// These tests cover the issue #35 Phase 2 WaitForApplied health gate:
+// frontierRemaining/gateRemaining's WaitForApplied branches, layered on the
+// Phase 1 walk (runRollout) which is otherwise unchanged and shared between
+// both modes. The all-Failed halt and the three-state Ready/all-Applied
+// completion check are explicitly out of scope for this slice (next items).
+
+// TestOnChange_WaitForApplied_PollsUntilAppliedThenAdvances is the primary
+// WaitForApplied walk test: it drives a fresh 2-target rollout end to end,
+// pinning (a) only target[0] is written on the first reconcile, with the
+// frontier stamped and Ready=False/RolloutInProgress in that same reconcile,
+// requeuing at pollInterval; (b) a reconcile while target[0]'s config is not
+// yet Applied for the current generation writes nothing and requeues at
+// exactly pollInterval again; (c) once target[0] reaches Applied (with
+// waitAfterApplied=0, no soak to wait out), the next reconcile advances and
+// writes target[1].
+func TestOnChange_WaitForApplied_PollsUntilAppliedThenAdvances(t *testing.T) {
+	t0, t1 := rolloutTarget("t0"), rolloutTarget("t1")
+	tmpl := rolloutTemplate("cfg")
+	pollInterval := 10 * time.Second
+	binding := rolloutBinding([]string{"t0", "t1"}, &vrouterv1.RolloutSpec{
+		Mode:         vrouterv1.RolloutModeWaitForApplied,
+		PollInterval: metav1.Duration{Duration: pollInterval},
+		// WaitAfterApplied left zero: no soak, advance as soon as Applied.
+	})
+
+	cl, scheme := newRolloutFixture(t, t0, t1, tmpl, binding)
+	r := &VRouterBindingReconciler{Client: cl, Scheme: scheme}
+	ctx := context.Background()
+
+	// First reconcile: writes only t0, stamps the frontier, Ready=False.
+	result, err := r.onChange(ctx, reconcile.Request{}, binding)
+	if err != nil {
+		t.Fatalf("reconcile 1: onChange returned error: %v", err)
+	}
+	if result.RequeueAfter != pollInterval {
+		t.Errorf("reconcile 1: RequeueAfter = %v, want %v", result.RequeueAfter, pollInterval)
+	}
+	if _, ok := getConfig(t, cl, "t0"); !ok {
+		t.Fatal("reconcile 1: VRouterConfig for t0 was not written")
+	}
+	if _, ok := getConfig(t, cl, "t1"); ok {
+		t.Error("reconcile 1: VRouterConfig for t1 was written, want only t0 written")
+	}
+	if binding.Status.Rollout == nil || binding.Status.Rollout.LastUpdatedTarget != "t0" {
+		t.Fatalf("reconcile 1: Status.Rollout = %+v, want LastUpdatedTarget=t0", binding.Status.Rollout)
+	}
+	if cond := readyCondition(binding); cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != ReasonRolloutInProgress || cond.Message != "1/2 targets updated" {
+		t.Errorf("reconcile 1: Ready condition = %+v, want False/RolloutInProgress/\"1/2 targets updated\"", cond)
+	}
+
+	// Second reconcile: t0's config is not yet Applied. Must write nothing
+	// and requeue at exactly pollInterval (a fixed duration, not derived from
+	// elapsed wall time, so this is safe to assert exactly).
+	result, err = r.onChange(ctx, reconcile.Request{}, binding)
+	if err != nil {
+		t.Fatalf("reconcile 2: onChange returned error: %v", err)
+	}
+	if result.RequeueAfter != pollInterval {
+		t.Errorf("reconcile 2: RequeueAfter = %v, want %v (time-based Applied poll)", result.RequeueAfter, pollInterval)
+	}
+	if _, ok := getConfig(t, cl, "t1"); ok {
+		t.Error("reconcile 2: VRouterConfig for t1 was written before t0 reached Applied")
+	}
+	if binding.Status.Rollout.LastUpdatedTarget != "t0" {
+		t.Errorf("reconcile 2: frontier = %q, want it to stay t0", binding.Status.Rollout.LastUpdatedTarget)
+	}
+
+	// Mark t0 Applied for its current (zero) generation. With
+	// waitAfterApplied=0 the next reconcile must advance past it immediately
+	// and write t1.
+	markConfigApplied(t, cl, "t0", time.Now())
+
+	result, err = r.onChange(ctx, reconcile.Request{}, binding)
+	if err != nil {
+		t.Fatalf("reconcile 3: onChange returned error: %v", err)
+	}
+	if result.RequeueAfter != pollInterval {
+		t.Errorf("reconcile 3: RequeueAfter = %v, want %v", result.RequeueAfter, pollInterval)
+	}
+	if _, ok := getConfig(t, cl, "t1"); !ok {
+		t.Fatal("reconcile 3: VRouterConfig for t1 was not written after t0 reached Applied")
+	}
+	if binding.Status.Rollout.LastUpdatedTarget != "t1" {
+		t.Fatalf("reconcile 3: frontier = %q, want t1", binding.Status.Rollout.LastUpdatedTarget)
+	}
+	if cond := readyCondition(binding); cond == nil || cond.Message != "2/2 targets updated" {
+		t.Errorf("reconcile 3: Ready condition message = %q, want \"2/2 targets updated\"", cond.Message)
+	}
+}
+
+// TestOnChange_WaitForApplied_SoaksAfterAppliedBeforeAdvancing pins the
+// waitAfterApplied soak: once the frontier's config reaches Applied, the walk
+// must not advance past it until waitAfterApplied has elapsed since the
+// Applied condition's own lastTransitionTime -- not just requeue at
+// pollInterval indefinitely, and not advance immediately either.
+func TestOnChange_WaitForApplied_SoaksAfterAppliedBeforeAdvancing(t *testing.T) {
+	t0, t1 := rolloutTarget("t0"), rolloutTarget("t1")
+	tmpl := rolloutTemplate("cfg")
+	pollInterval := 10 * time.Second
+	waitAfterApplied := time.Hour
+	binding := rolloutBinding([]string{"t0", "t1"}, &vrouterv1.RolloutSpec{
+		Mode:             vrouterv1.RolloutModeWaitForApplied,
+		PollInterval:     metav1.Duration{Duration: pollInterval},
+		WaitAfterApplied: metav1.Duration{Duration: waitAfterApplied},
+	})
+
+	cl, scheme := newRolloutFixture(t, t0, t1, tmpl, binding)
+	r := &VRouterBindingReconciler{Client: cl, Scheme: scheme}
+	ctx := context.Background()
+
+	if _, err := r.onChange(ctx, reconcile.Request{}, binding); err != nil {
+		t.Fatalf("reconcile 1: %v", err)
+	}
+	if binding.Status.Rollout.LastUpdatedTarget != "t0" {
+		t.Fatalf("setup: frontier = %q, want t0", binding.Status.Rollout.LastUpdatedTarget)
+	}
+
+	// t0 just reached Applied (lastTransitionTime ~= now): the soak has
+	// barely started, so t1 must not be written yet, and the requeue must
+	// reflect the (nearly full) remaining soak -- not pollInterval.
+	markConfigApplied(t, cl, "t0", time.Now())
+
+	result, err := r.onChange(ctx, reconcile.Request{}, binding)
+	if err != nil {
+		t.Fatalf("reconcile 2: onChange returned error: %v", err)
+	}
+	if result.RequeueAfter <= 0 || result.RequeueAfter > waitAfterApplied {
+		t.Errorf("reconcile 2: RequeueAfter = %v, want in (0, %v] (soak remaining)", result.RequeueAfter, waitAfterApplied)
+	}
+	if result.RequeueAfter < waitAfterApplied-5*time.Second {
+		t.Errorf("reconcile 2: RequeueAfter = %v, want close to the full %v soak (not pollInterval=%v)", result.RequeueAfter, waitAfterApplied, pollInterval)
+	}
+	if _, ok := getConfig(t, cl, "t1"); ok {
+		t.Error("reconcile 2: VRouterConfig for t1 was written before the soak elapsed")
+	}
+	if binding.Status.Rollout.LastUpdatedTarget != "t0" {
+		t.Errorf("reconcile 2: frontier = %q, want it to stay t0", binding.Status.Rollout.LastUpdatedTarget)
+	}
+
+	// Fast-forward the soak by backdating the Applied condition's
+	// lastTransitionTime well past waitAfterApplied.
+	markConfigApplied(t, cl, "t0", time.Now().Add(-2*waitAfterApplied))
+
+	if _, err := r.onChange(ctx, reconcile.Request{}, binding); err != nil {
+		t.Fatalf("reconcile 3: onChange returned error: %v", err)
+	}
+	if _, ok := getConfig(t, cl, "t1"); !ok {
+		t.Fatal("reconcile 3: VRouterConfig for t1 was not written after the soak elapsed")
+	}
+	if binding.Status.Rollout.LastUpdatedTarget != "t1" {
+		t.Errorf("reconcile 3: frontier = %q, want t1", binding.Status.Rollout.LastUpdatedTarget)
+	}
+}
+
+// TestOnChange_WaitForApplied_StaleGenerationAppliedDoesNotAdvance pins the
+// generation-correctness of the Applied gate: an Applied=True condition left
+// over from before a re-render bumped the config's generation must not count
+// as "Applied for the current generation" -- the walk must keep polling
+// rather than treating a stale success as current.
+func TestOnChange_WaitForApplied_StaleGenerationAppliedDoesNotAdvance(t *testing.T) {
+	t0, t1 := rolloutTarget("t0"), rolloutTarget("t1")
+	tmpl := rolloutTemplate("cfg")
+	pollInterval := 10 * time.Second
+	binding := rolloutBinding([]string{"t0", "t1"}, &vrouterv1.RolloutSpec{
+		Mode:         vrouterv1.RolloutModeWaitForApplied,
+		PollInterval: metav1.Duration{Duration: pollInterval},
+	})
+
+	cl, scheme := newRolloutFixture(t, t0, t1, tmpl, binding)
+	r := &VRouterBindingReconciler{Client: cl, Scheme: scheme}
+	ctx := context.Background()
+
+	if _, err := r.onChange(ctx, reconcile.Request{}, binding); err != nil {
+		t.Fatalf("reconcile 1: %v", err)
+	}
+	if binding.Status.Rollout.LastUpdatedTarget != "t0" {
+		t.Fatalf("setup: frontier = %q, want t0", binding.Status.Rollout.LastUpdatedTarget)
+	}
+
+	// t0's config is now at generation 2 (e.g. a later spec edit), but its
+	// Applied condition is still True for the older generation 1 -- stale.
+	markConfigAppliedForGeneration(t, cl, "t0", 2, 1, time.Now())
+
+	result, err := r.onChange(ctx, reconcile.Request{}, binding)
+	if err != nil {
+		t.Fatalf("reconcile 2: onChange returned error: %v", err)
+	}
+	if result.RequeueAfter != pollInterval {
+		t.Errorf("reconcile 2: RequeueAfter = %v, want %v (still polling, stale Applied must not satisfy the gate)", result.RequeueAfter, pollInterval)
+	}
+	if _, ok := getConfig(t, cl, "t1"); ok {
+		t.Error("reconcile 2: VRouterConfig for t1 was written despite t0's Applied condition being stale (wrong generation)")
+	}
+	if binding.Status.Rollout.LastUpdatedTarget != "t0" {
+		t.Errorf("reconcile 2: frontier = %q, want it to stay t0", binding.Status.Rollout.LastUpdatedTarget)
+	}
+}
+
+// TestOnChange_WaitForApplied_UniversalWriteGate_BlocksReRenderMidRollout
+// mirrors the FixedInterval universal-write-gate test for WaitForApplied: a
+// re-render that produces a new first-mismatch target which is NOT the
+// current frontier must not be written until the frontier's own Applied+soak
+// gate is satisfied, even though that new first-mismatch target was never
+// touched by the rollout before.
+func TestOnChange_WaitForApplied_UniversalWriteGate_BlocksReRenderMidRollout(t *testing.T) {
+	t0, t1, t2 := rolloutTarget("t0"), rolloutTarget("t1"), rolloutTarget("t2")
+	tmpl := rolloutTemplate("A")
+	pollInterval := 10 * time.Second
+	binding := rolloutBinding([]string{"t0", "t1", "t2"}, &vrouterv1.RolloutSpec{
+		Mode:         vrouterv1.RolloutModeWaitForApplied,
+		PollInterval: metav1.Duration{Duration: pollInterval},
+	})
+
+	cl, scheme := newRolloutFixture(t, t0, t1, t2, tmpl, binding)
+	r := &VRouterBindingReconciler{Client: cl, Scheme: scheme}
+	ctx := context.Background()
+
+	// Advance the rollout to frontier=t1 (t0 already written and applied).
+	if _, err := r.onChange(ctx, reconcile.Request{}, binding); err != nil {
+		t.Fatalf("reconcile 1: %v", err)
+	}
+	markConfigApplied(t, cl, "t0", time.Now())
+	if _, err := r.onChange(ctx, reconcile.Request{}, binding); err != nil {
+		t.Fatalf("reconcile 2: %v", err)
+	}
+	if binding.Status.Rollout.LastUpdatedTarget != "t1" {
+		t.Fatalf("setup: frontier = %q, want t1", binding.Status.Rollout.LastUpdatedTarget)
+	}
+	t0Before, ok := getConfig(t, cl, "t0")
+	if !ok {
+		t.Fatal("setup: t0 config missing")
+	}
+
+	// Re-render: change the template so every target's desired spec changes.
+	// t0 (already written, spec "A") becomes the new first mismatch against
+	// desired spec "B", but t0 is NOT the frontier (t1 is, and t1 has not
+	// reached Applied yet). The universal write gate must block this write.
+	tmpl.Spec.Config = "B"
+	if err := cl.Update(ctx, tmpl); err != nil {
+		t.Fatalf("update template: %v", err)
+	}
+
+	result, err := r.onChange(ctx, reconcile.Request{}, binding)
+	if err != nil {
+		t.Fatalf("reconcile 3: onChange returned error: %v", err)
+	}
+	if result.RequeueAfter != pollInterval {
+		t.Errorf("reconcile 3: RequeueAfter = %v, want %v (gated on frontier t1's Applied poll)", result.RequeueAfter, pollInterval)
+	}
+	t0After, ok := getConfig(t, cl, "t0")
+	if !ok {
+		t.Fatal("reconcile 3: t0 config disappeared")
+	}
+	if t0After.Spec.Config != t0Before.Spec.Config {
+		t.Errorf("reconcile 3: t0 config changed to %q, want it untouched until the gate passes", t0After.Spec.Config)
+	}
+	if binding.Status.Rollout.LastUpdatedTarget != "t1" {
+		t.Errorf("reconcile 3: frontier = %q, want it to stay t1 (no write happened)", binding.Status.Rollout.LastUpdatedTarget)
+	}
+
+	// Mark t1 Applied: the gate now passes and t0 (the first mismatch) is
+	// written directly with the new render, becoming the new frontier.
+	markConfigApplied(t, cl, "t1", time.Now())
+	if _, err := r.onChange(ctx, reconcile.Request{}, binding); err != nil {
+		t.Fatalf("reconcile 4: onChange returned error: %v", err)
+	}
+	t0Final, ok := getConfig(t, cl, "t0")
+	if !ok {
+		t.Fatal("reconcile 4: t0 config missing")
+	}
+	if t0Final.Spec.Config != "B" {
+		t.Errorf("reconcile 4: t0 config = %q, want the new render \"B\" once the gate passed", t0Final.Spec.Config)
+	}
+	if binding.Status.Rollout.LastUpdatedTarget != "t0" {
+		t.Errorf("reconcile 4: frontier = %q, want t0 (the new first mismatch)", binding.Status.Rollout.LastUpdatedTarget)
+	}
+}
+
+// TestOnChange_WaitForApplied_FrontierEvictedFromTargetRefs_TimeDegradedGate
+// pins the frontier-eviction edge case for WaitForApplied: when the frontier
+// target is removed from targetRefs mid-rollout, the universal write gate
+// degrades to a pure time-based wait of waitAfterApplied (not pollInterval,
+// and not health-gated on an object that may no longer exist) measured from
+// the persisted frontier stamp.
+func TestOnChange_WaitForApplied_FrontierEvictedFromTargetRefs_TimeDegradedGate(t *testing.T) {
+	t0, t1, t2 := rolloutTarget("t0"), rolloutTarget("t1"), rolloutTarget("t2")
+	tmpl := rolloutTemplate("cfg")
+	pollInterval := 10 * time.Second
+	waitAfterApplied := time.Hour
+	binding := rolloutBinding([]string{"t0", "t1", "t2"}, &vrouterv1.RolloutSpec{
+		Mode:             vrouterv1.RolloutModeWaitForApplied,
+		PollInterval:     metav1.Duration{Duration: pollInterval},
+		WaitAfterApplied: metav1.Duration{Duration: waitAfterApplied},
+	})
+
+	cl, scheme := newRolloutFixture(t, t0, t1, t2, tmpl, binding)
+	r := &VRouterBindingReconciler{Client: cl, Scheme: scheme}
+	ctx := context.Background()
+
+	if _, err := r.onChange(ctx, reconcile.Request{}, binding); err != nil {
+		t.Fatalf("reconcile 1: %v", err)
+	}
+	if binding.Status.Rollout.LastUpdatedTarget != "t0" {
+		t.Fatalf("setup: frontier = %q, want t0", binding.Status.Rollout.LastUpdatedTarget)
+	}
+
+	// Remove t0 from targetRefs mid-rollout, without ever marking it Applied.
+	binding.Spec.TargetRefs = []vrouterv1.NameRef{{Name: "t1"}, {Name: "t2"}}
+	if err := cl.Update(ctx, binding); err != nil {
+		t.Fatalf("persist targetRefs eviction: %v", err)
+	}
+
+	result, err := r.onChange(ctx, reconcile.Request{}, binding)
+	if err != nil {
+		t.Fatalf("reconcile 2: onChange returned error: %v", err)
+	}
+	if _, ok := getConfig(t, cl, "t0"); ok {
+		t.Error("reconcile 2: orphan VRouterConfig for evicted t0 was not cleaned up")
+	}
+	if result.RequeueAfter <= 0 || result.RequeueAfter > waitAfterApplied {
+		t.Errorf("reconcile 2: RequeueAfter = %v, want in (0, %v] (time-degraded gate on evicted frontier)", result.RequeueAfter, waitAfterApplied)
+	}
+	if result.RequeueAfter < waitAfterApplied-5*time.Second {
+		t.Errorf("reconcile 2: RequeueAfter = %v, want close to the full waitAfterApplied=%v, not pollInterval=%v (must not health-gate an evicted target)", result.RequeueAfter, waitAfterApplied, pollInterval)
+	}
+	if _, ok := getConfig(t, cl, "t1"); ok {
+		t.Error("reconcile 2: t1 config was written despite the time-degraded gate not having elapsed")
+	}
+	if binding.Status.Rollout.LastUpdatedTarget != "t0" {
+		t.Errorf("reconcile 2: frontier = %q, want it to stay t0 (record kept even though the target/object is gone)", binding.Status.Rollout.LastUpdatedTarget)
+	}
+
+	// Backdate the (evicted) frontier's stamp past waitAfterApplied: the
+	// time-degraded gate now passes and t1 is written.
+	backdateFrontier(t, cl, binding, 2*waitAfterApplied)
+	if _, err := r.onChange(ctx, reconcile.Request{}, binding); err != nil {
+		t.Fatalf("reconcile 3: onChange returned error: %v", err)
+	}
+	if _, ok := getConfig(t, cl, "t1"); !ok {
+		t.Fatal("reconcile 3: t1 config was not written after the evicted frontier's wait elapsed")
+	}
+	if binding.Status.Rollout.LastUpdatedTarget != "t1" {
+		t.Errorf("reconcile 3: frontier = %q, want t1", binding.Status.Rollout.LastUpdatedTarget)
 	}
 }

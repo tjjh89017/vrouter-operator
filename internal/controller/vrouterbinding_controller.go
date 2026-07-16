@@ -245,8 +245,8 @@ func (r *VRouterBindingReconciler) cleanupOrphans(ctx context.Context, binding *
 }
 
 // createOrUpdateAll writes every desired VRouterConfig in one pass. This is
-// the write step for RolloutModeDisabled (and, for now, RolloutModeWaitForApplied
-// — see the mode dispatch comment in onChange).
+// the write step for RolloutModeDisabled only — see the mode dispatch
+// comment in onChange.
 func (r *VRouterBindingReconciler) createOrUpdateAll(ctx context.Context, binding *vrouterv1.VRouterBinding, desired []desiredConfig) error {
 	for _, d := range desired {
 		if err := r.createOrUpdateOne(ctx, binding, d); err != nil {
@@ -310,20 +310,47 @@ func inTargetRefs(binding *vrouterv1.VRouterBinding, targetName string) bool {
 	return false
 }
 
+// appliedConditionForGeneration returns cfg's Applied condition when it is
+// currently True for cfg's own generation — i.e. the most recently rendered
+// spec was actually applied, not a stale True left over from before a
+// re-render bumped the generation. Returns nil for a missing config (cfg ==
+// nil), a config with no Applied condition yet, a False/unknown condition, or
+// a True condition whose ObservedGeneration lags cfg.Generation.
+func appliedConditionForGeneration(cfg *vrouterv1.VRouterConfig) *metav1.Condition {
+	if cfg == nil {
+		return nil
+	}
+	cond := meta.FindStatusCondition(cfg.Status.Conditions, vrouterv1.ConditionApplied)
+	if cond == nil || cond.Status != metav1.ConditionTrue || cond.ObservedGeneration != cfg.Generation {
+		return nil
+	}
+	return cond
+}
+
 // frontierRemaining returns how much longer the walk must wait before
 // advancing past the current frontier target. Mirrors the issue #35
-// pseudocode's frontierRemaining; only RolloutModeFixedInterval is
-// implemented for now (cfg is unused there but kept in the signature so a
-// future WaitForApplied branch — which needs the frontier's generated
-// VRouterConfig to read its Applied condition — can be added without
-// restructuring callers).
-func frontierRemaining(mode string, rollout *vrouterv1.RolloutSpec, _ *vrouterv1.VRouterConfig, frontier *vrouterv1.RolloutStatus, now time.Time) time.Duration {
+// pseudocode's frontierRemaining. A missing frontier config (cfg == nil, e.g.
+// deleted while it was the frontier) is treated the same as "not yet Applied"
+// in WaitForApplied — it just keeps polling rather than erroring — since the
+// config controller will recreate it via createOrUpdateOne on the next write.
+func frontierRemaining(mode string, rollout *vrouterv1.RolloutSpec, cfg *vrouterv1.VRouterConfig, frontier *vrouterv1.RolloutStatus, now time.Time) time.Duration {
 	switch mode {
 	case vrouterv1.RolloutModeFixedInterval:
 		if frontier == nil {
 			return 0
 		}
 		return frontier.LastUpdateTime.Time.Add(rollout.WaitInterval.Duration).Sub(now)
+	case vrouterv1.RolloutModeWaitForApplied:
+		cond := appliedConditionForGeneration(cfg)
+		if cond == nil {
+			// Not yet Applied for the current generation (or config missing):
+			// time-based poll, no health signal to react to yet.
+			return rollout.PollInterval.Duration
+		}
+		// Applied: soak for waitAfterApplied, measured from the Applied
+		// condition's own lastTransitionTime (not the frontier stamp), so a
+		// slow apply doesn't shortchange the soak period.
+		return cond.LastTransitionTime.Time.Add(rollout.WaitAfterApplied.Duration).Sub(now)
 	default:
 		return 0
 	}
@@ -364,10 +391,24 @@ func (r *VRouterBindingReconciler) gateRemaining(ctx context.Context, binding *v
 
 // rolloutWaitDuration returns the mode-appropriate wait used by the
 // frontier-evicted time-degraded gate. FixedInterval uses waitInterval;
-// WaitForApplied (Phase 2) will use waitAfterApplied.
+// WaitForApplied uses waitAfterApplied (never health-gate a target the user
+// just evicted — see gateRemaining).
 func rolloutWaitDuration(mode string, rollout *vrouterv1.RolloutSpec) time.Duration {
 	if mode == vrouterv1.RolloutModeWaitForApplied {
 		return rollout.WaitAfterApplied.Duration
+	}
+	return rollout.WaitInterval.Duration
+}
+
+// postWriteRequeueInterval returns the RequeueAfter used immediately after
+// the rollout walk writes a config. FixedInterval requeues at waitInterval —
+// the full stagger gap, since it never re-checks health in between.
+// WaitForApplied requeues at pollInterval — a short check of whether the
+// just-written config has reached Applied yet, per the pseudocode's
+// time-based Applied polling.
+func postWriteRequeueInterval(mode string, rollout *vrouterv1.RolloutSpec) time.Duration {
+	if mode == vrouterv1.RolloutModeWaitForApplied {
+		return rollout.PollInterval.Duration
 	}
 	return rollout.WaitInterval.Duration
 }
@@ -395,15 +436,19 @@ func (r *VRouterBindingReconciler) stampRolloutFrontier(ctx context.Context, bin
 	return r.Status().Patch(ctx, binding, patch)
 }
 
-// runFixedIntervalRollout implements mode: FixedInterval per the issue #35
-// pseudocode's "update only the first mismatch per reconcile" walk: it visits
+// runRollout implements the serial "update only the first mismatch per
+// reconcile" walk shared by mode: FixedInterval and mode: WaitForApplied (see
+// issue #35: "Reuses the phase-1 skeleton unchanged" for Phase 2). It visits
 // desired targets in order, writes at most one config (the first whose
 // rendered spec differs from the existing generated VRouterConfig, once the
 // universal write gate is satisfied), and requeues rather than looping in
-// memory. The wait is always computed from the persisted
-// status.rollout.lastUpdateTime, never from in-memory state, so the interval
-// is a hard guarantee across operator restarts and unrelated watch events.
-func (r *VRouterBindingReconciler) runFixedIntervalRollout(ctx context.Context, binding *vrouterv1.VRouterBinding, desired []desiredConfig) (ctrl.Result, error) {
+// memory. The wait is always computed from persisted state — status.rollout,
+// or (WaitForApplied) the frontier config's Applied condition — never from
+// in-memory state, so the stagger is a hard guarantee across operator
+// restarts and unrelated watch events. Mode-specific behavior lives entirely
+// in frontierRemaining/gateRemaining/postWriteRequeueInterval; this walk
+// itself has no mode branches.
+func (r *VRouterBindingReconciler) runRollout(ctx context.Context, binding *vrouterv1.VRouterBinding, desired []desiredConfig) (ctrl.Result, error) {
 	mode := binding.Spec.Rollout.EffectiveMode()
 	now := r.now()
 	frontier := binding.Status.Rollout
@@ -431,7 +476,7 @@ func (r *VRouterBindingReconciler) runFixedIntervalRollout(ctx context.Context, 
 			if err := r.createOrUpdateOne(ctx, binding, d); err != nil {
 				return ctrl.Result{}, err
 			}
-			return ctrl.Result{RequeueAfter: binding.Spec.Rollout.WaitInterval.Duration}, nil
+			return ctrl.Result{RequeueAfter: postWriteRequeueInterval(mode, binding.Spec.Rollout)}, nil
 		}
 
 		// Spec matches. If this target isn't the frontier, it either never
@@ -471,15 +516,12 @@ func (r *VRouterBindingReconciler) onChange(ctx context.Context, _ ctrl.Request,
 		return ctrl.Result{}, err
 	}
 
-	// Mode dispatch: RolloutModeFixedInterval takes the serial rollout walk
-	// below. RolloutModeDisabled and, for now, RolloutModeWaitForApplied both
-	// fall through to the one-pass write. WaitForApplied's own health-gated
-	// walk is issue #35 Phase 2; falling through to one-pass here (rather
-	// than reusing the FixedInterval walk) keeps semantics honest in the
-	// meantime, since WaitForApplied's Applied-gate isn't implemented yet and
-	// its waitInterval field doesn't even exist.
-	if binding.Spec.Rollout.EffectiveMode() == vrouterv1.RolloutModeFixedInterval {
-		return r.runFixedIntervalRollout(ctx, binding, desired)
+	// Mode dispatch: RolloutModeFixedInterval and RolloutModeWaitForApplied
+	// both take the shared serial rollout walk (runRollout); only
+	// RolloutModeDisabled keeps the one-pass write-everything behavior.
+	switch binding.Spec.Rollout.EffectiveMode() {
+	case vrouterv1.RolloutModeFixedInterval, vrouterv1.RolloutModeWaitForApplied:
+		return r.runRollout(ctx, binding, desired)
 	}
 
 	if err := r.createOrUpdateAll(ctx, binding, desired); err != nil {
