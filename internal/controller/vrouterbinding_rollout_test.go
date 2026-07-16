@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -30,6 +31,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	vrouterv1 "github.com/tjjh89017/vrouter-operator/api/v1"
@@ -1638,5 +1640,105 @@ func TestOnChange_WaitForApplied_ProgressMessageAccuracy(t *testing.T) {
 			t.Errorf("reconcile (write %s): Ready message = %q, want %q", tn, cond.Message, wantMessages[i])
 		}
 		markConfigApplied(t, cl, tn, time.Now())
+	}
+}
+
+// failingStatusPatchClient wraps cl so that every status-subresource Patch
+// call fails with simErr, while every other call (including spec updates and
+// the earlier reconciles' status patches, since those go through the plain
+// cl the test drives beforehand) behaves normally. Used to simulate a
+// transient apiserver error (409 conflict, timeout, ...) landing exactly on
+// the rollout-completion Status().Patch call.
+func failingStatusPatchClient(t *testing.T, cl client.Client, simErr error) client.Client {
+	t.Helper()
+	wc, ok := cl.(client.WithWatch)
+	if !ok {
+		t.Fatalf("failingStatusPatchClient: %T does not implement client.WithWatch", cl)
+	}
+	return interceptor.NewClient(wc, interceptor.Funcs{
+		SubResourcePatch: func(ctx context.Context, c client.Client, subResourceName string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
+			return simErr
+		},
+	})
+}
+
+// TestOnChange_WaitForApplied_CompletionStatusPatchFails_ReturnsErrorInsteadOfSilentSuccess
+// pins the fix for the review finding on setReadyCondition: the rollout-
+// completion call site (the final `r.setReadyCondition(..., ConditionTrue,
+// "ReconcileSucceeded", ...)` in runRollout) must propagate a failed
+// Status().Patch instead of swallowing it. Before the fix, onChange returned
+// (ctrl.Result{}, nil) here even though the Ready=True write never reached
+// the apiserver -- a false negative with no requeue, no watch, and no
+// SyncPeriod resync to ever retry it, hanging `kubectl wait
+// --for=condition=Ready` on a rollout that had, in fact, completed.
+func TestOnChange_WaitForApplied_CompletionStatusPatchFails_ReturnsErrorInsteadOfSilentSuccess(t *testing.T) {
+	t0, t1 := rolloutTarget("t0"), rolloutTarget("t1")
+	tmpl := rolloutTemplate("cfg")
+	pollInterval := 10 * time.Second
+	binding := rolloutBinding([]string{"t0", "t1"}, &vrouterv1.RolloutSpec{
+		Mode:         vrouterv1.RolloutModeWaitForApplied,
+		PollInterval: metav1.Duration{Duration: pollInterval},
+	})
+
+	cl, scheme := newRolloutFixture(t, t0, t1, tmpl, binding)
+	r := &VRouterBindingReconciler{Client: cl, Scheme: scheme}
+	ctx := context.Background()
+
+	// Drive the walk to the brink of completion: every target written and
+	// Applied. The next reconcile is the completion reconcile under test.
+	for _, tn := range []string{"t0", "t1"} {
+		if _, err := r.onChange(ctx, reconcile.Request{}, binding); err != nil {
+			t.Fatalf("reconcile (write %s): %v", tn, err)
+		}
+		markConfigApplied(t, cl, tn, time.Now())
+	}
+
+	simErr := errors.NewInternalError(fmt.Errorf("simulated apiserver failure"))
+	rf := &VRouterBindingReconciler{Client: failingStatusPatchClient(t, cl, simErr), Scheme: scheme}
+
+	result, err := rf.onChange(ctx, reconcile.Request{}, binding)
+	if err == nil {
+		t.Fatalf("completion reconcile: onChange returned (result=%+v, err=nil) despite a failed status patch -- "+
+			"the rollout completed but the Ready=True write was lost with nothing scheduled to retry it", result)
+	}
+}
+
+// TestOnChange_FixedInterval_CompletionStatusPatchFails_ReturnsErrorInsteadOfSilentSuccess
+// is the mode: FixedInterval counterpart of the WaitForApplied test above,
+// pinning the same fix at the other completion call site in runRollout (the
+// bottom-of-function True/ReconcileSucceeded stamp reached once every target
+// matches and the frontier's wait has elapsed).
+func TestOnChange_FixedInterval_CompletionStatusPatchFails_ReturnsErrorInsteadOfSilentSuccess(t *testing.T) {
+	t0, t1 := rolloutTarget("t0"), rolloutTarget("t1")
+	tmpl := rolloutTemplate("cfg")
+	waitInterval := time.Hour
+	binding := rolloutBinding([]string{"t0", "t1"}, &vrouterv1.RolloutSpec{
+		Mode:         vrouterv1.RolloutModeFixedInterval,
+		WaitInterval: metav1.Duration{Duration: waitInterval},
+	})
+
+	cl, scheme := newRolloutFixture(t, t0, t1, tmpl, binding)
+	r := &VRouterBindingReconciler{Client: cl, Scheme: scheme}
+	ctx := context.Background()
+
+	// Drive the walk to the brink of completion: t0 written, interval
+	// elapsed, t1 written, interval elapsed again. The next reconcile is the
+	// completion reconcile under test.
+	if _, err := r.onChange(ctx, reconcile.Request{}, binding); err != nil {
+		t.Fatalf("reconcile (write t0): %v", err)
+	}
+	backdateFrontier(t, cl, binding, 2*waitInterval)
+	if _, err := r.onChange(ctx, reconcile.Request{}, binding); err != nil {
+		t.Fatalf("reconcile (write t1): %v", err)
+	}
+	backdateFrontier(t, cl, binding, 2*waitInterval)
+
+	simErr := errors.NewInternalError(fmt.Errorf("simulated apiserver failure"))
+	rf := &VRouterBindingReconciler{Client: failingStatusPatchClient(t, cl, simErr), Scheme: scheme}
+
+	result, err := rf.onChange(ctx, reconcile.Request{}, binding)
+	if err == nil {
+		t.Fatalf("completion reconcile: onChange returned (result=%+v, err=nil) despite a failed status patch -- "+
+			"the rollout completed but the Ready=True write was lost with nothing scheduled to retry it", result)
 	}
 }
