@@ -667,10 +667,14 @@ onChange():
          generation check in step 6 before it ever runs — deadlock the
          config exactly like the "exec result lost" case, immune even to a
          spec update.
-       → exitCode == 0 → clear execPID, set phase=Applied, condition Applied=True
-         (stamped with the generation this exec was dispatched for), return nil
-       → exitCode != 0 → clear execPID, set phase=Failed, condition Applied=False
-         (stamped with the generation this exec was dispatched for), return nil
+       → exitCode == 0 and no failure marker in the apply output → clear execPID,
+         set phase=Applied, condition Applied=True (stamped with the generation
+         this exec was dispatched for), return nil
+       → exitCode != 0, OR a failure marker (Set failed / Commit failed /
+         Delete failed) is present in the apply output even with exitCode == 0
+         (a set-time validation failure still lets `commit` exit 0, see §7.4) →
+         clear execPID, set phase=Failed, condition Applied=False (stamped with
+         the generation this exec was dispatched for), return nil
 
   5. Check reboot: force re-apply only if target.status.lastRebootTime is newer
      than the last reboot this config has already dispatched an attempt for.
@@ -799,6 +803,7 @@ save
 - `commands`: a single pre-joined block of `set` commands (already newline-joined by BindingController from one or more templates, or supplied directly on a hand-authored VRouterConfig) executed in configure mode — not a list iterated by the script template itself
 - `commit` is always appended; `save` is conditional (default: true), controlled by `spec.save`
 - The script is written to a fixed path `/tmp/vrouter-apply.sh` (overwritten each time) then executed
+- **The guest exit code is not the sole success signal.** A `set` command that fails at set-time (e.g. an invalid interface address) prints an error to the output, but because the preceding `load` already left a committable diff, `commit` still exits 0 — so the exit code alone can mask the failure. The operator therefore also scans the combined apply output (stdout+stderr) for a curated list of router config validator failure markers (`Set failed`, `Commit failed`, `Delete failed`, matched case-insensitively) and reports `phase=Failed` on a match even when the exit code is 0. `set -e` in the apply script is not an option: the vyatta config-mode `set`/`load` functions return non-zero even on success, so it would abort valid configs.
 
 ### 7.5 QGA Script Execution Flow
 
