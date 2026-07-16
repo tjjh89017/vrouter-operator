@@ -44,6 +44,24 @@ spec:
             properties:
               params:
                 x-kubernetes-preserve-unknown-fields: true
+              paramsRefs:
+                description: |-
+                  ParamsRefs is an ordered list of VRouterParams to merge, same-namespace only.
+                  Later entries override earlier ones; the merged result is applied below
+                  (i.e. is overridden by) this binding's own Params.
+                items:
+                  description: |-
+                    NameRef is a reference to a resource by name, optionally in another namespace.
+                    When Namespace is empty, the namespace of the referencing resource is used.
+                  properties:
+                    name:
+                      type: string
+                    namespace:
+                      type: string
+                  required:
+                  - name
+                  type: object
+                type: array
               save:
                 default: true
                 description: |-

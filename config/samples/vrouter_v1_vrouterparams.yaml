@@ -1,0 +1,11 @@
+apiVersion: vrouter.kojuro.date/v1
+kind: VRouterParams
+metadata:
+  labels:
+    app.kubernetes.io/name: vrouter-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: subnet-params
+  namespace: default
+spec:
+  params:
+    subnetGateway: "192.168.1.1"
