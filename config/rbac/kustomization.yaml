@@ -37,4 +37,7 @@ resources:
 - vroutertemplate_admin_role.yaml
 - vroutertemplate_editor_role.yaml
 - vroutertemplate_viewer_role.yaml
+- vrouterparams_admin_role.yaml
+- vrouterparams_editor_role.yaml
+- vrouterparams_viewer_role.yaml
 

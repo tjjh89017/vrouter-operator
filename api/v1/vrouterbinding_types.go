@@ -30,7 +30,12 @@ type VRouterBindingSpec struct {
 	// later templates' config and commands are appended after earlier ones.
 	// +optional
 	TemplateRefs []NameRef `json:"templateRefs,omitempty"`
-	TargetRefs   []NameRef `json:"targetRefs"`
+	// ParamsRefs is an ordered list of VRouterParams to merge, same-namespace only.
+	// Later entries override earlier ones; the merged result is applied below
+	// (i.e. is overridden by) this binding's own Params.
+	// +optional
+	ParamsRefs []NameRef `json:"paramsRefs,omitempty"`
+	TargetRefs []NameRef `json:"targetRefs"`
 	// Save controls whether the applied configuration is persisted so it
 	// survives a reboot. Defaults to true when unset.
 	// +kubebuilder:default=true
