@@ -2,10 +2,9 @@ name: E2E KubeVirt
 
 # Acceptance-gate workflow for issue #38: stand up the full environment on a
 # hosted runner and run the KubeVirt provider e2e suite (ginkgo label
-# "kubevirt-e2e"). It reuses the proven setup from e2e-kubevirt-probe.yml
-# (k3s + KubeVirt + a real DozenOS containerDisk guest booted on hardware KVM)
-# and adds the pieces the suite needs: a Go toolchain to run `go test`, and a
-# DozenOS containerDisk tagged for the spec.
+# "kubevirt-e2e"). It stands up k3s + KubeVirt + a real DozenOS containerDisk
+# guest booted on hardware KVM, plus the pieces the suite needs: a Go toolchain
+# to run `go test`, and a DozenOS containerDisk tagged for the spec.
 #
 # What this workflow deliberately does NOT do (the suite owns it, so doing it
 # here would double-work or conflict):
