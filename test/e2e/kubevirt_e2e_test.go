@@ -287,8 +287,7 @@ var _ = Describe("KubeVirt provider data path", Ordered, Label("kubevirt-e2e"), 
 })
 
 // virtualMachineManifest renders a KubeVirt VirtualMachine (runStrategy=Always)
-// booting the given containerDisk image as the guest virtual router. Mirrors the
-// proven probe manifest (.github/workflows/e2e-kubevirt-probe.yml): a real VM
+// booting the given containerDisk image as the guest virtual router. A real VM
 // (not a bare VMI) so it exercises the same object the operator targets by name.
 func virtualMachineManifest(name, ns, image string) string {
 	return fmt.Sprintf(`apiVersion: kubevirt.io/v1
@@ -425,10 +424,9 @@ type guestExecArguments struct {
 }
 
 // qgaGuestExec runs a command inside the guest via QGA and returns its decoded
-// stdout. It mirrors the proven probe recon pattern
-// (.github/workflows/e2e-kubevirt-probe.yml) and the operator's own runQGA:
-// dispatch guest-exec inside the virt-launcher `compute` container with virsh,
-// poll guest-exec-status until the process exits, then base64-decode out-data.
+// stdout. It mirrors the operator's own runQGA: dispatch guest-exec inside the
+// virt-launcher `compute` container with virsh, poll guest-exec-status until the
+// process exits, then base64-decode out-data.
 func qgaGuestExec(ns, launcher, domain, path string, args ...string) (string, error) {
 	payload, err := json.Marshal(guestExecCommand{
 		Execute: "guest-exec",
