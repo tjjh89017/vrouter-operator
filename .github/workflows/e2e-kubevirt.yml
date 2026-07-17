@@ -1,17 +1,22 @@
 name: E2E KubeVirt
 
-# Acceptance-gate workflow for issue #38: stand up the full environment on a
-# hosted runner and run the KubeVirt provider e2e suite (ginkgo label
-# "kubevirt-e2e"). It stands up k3s + KubeVirt + a real DozenOS containerDisk
-# guest booted on hardware KVM, plus the pieces the suite needs: a Go toolchain
-# to run `go test`, and a DozenOS containerDisk tagged for the spec.
+# Acceptance-gate workflow for issue #38 (KubeVirt provider, ginkgo label
+# "kubevirt-e2e") and issue #35's serial rollout feature (ginkgo label
+# "rollout-e2e", test/e2e/rollout_e2e_test.go). It stands up k3s + KubeVirt +
+# a real DozenOS containerDisk guest booted on hardware KVM, plus the pieces
+# the suites need: a Go toolchain to run `go test`, and a DozenOS containerDisk
+# tagged for both suites. rollout-e2e boots two guest VMs (kubevirt-e2e's own
+# VM is freed by its AfterAll before rollout-e2e's BeforeAll boots its pair),
+# so timeout-minutes is raised from the original 40 to comfortably cover the
+# extra ~10m boot budget for a second VM plus rollout-e2e's four multi-minute
+# Eventually/Consistently specs on top of the existing kubevirt-e2e budget.
 #
 # What this workflow deliberately does NOT do (the suite owns it, so doing it
 # here would double-work or conflict):
 #   - build/import the operator image: the suite's BeforeSuite runs
 #     `make docker-build` + LoadImageToK3sContainerd(projectImage) itself.
-#   - install CRDs / deploy the controller: the kubevirt-e2e spec's BeforeAll
-#     runs `make install` + `make deploy` itself.
+#   - install CRDs / deploy the controller: each labeled spec's own BeforeAll
+#     runs `make install` + `make deploy` itself (both idempotent).
 #
 # cert-manager IS installed here (the "Install cert-manager (pinned)" step),
 # early and on an un-contended node, because on this single k3s node the
@@ -55,7 +60,7 @@ jobs:
   e2e-kubevirt:
     name: KubeVirt provider e2e
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 70
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -177,7 +182,7 @@ jobs:
           sudo k3s ctr images ls | grep -i "dozenos-e2e" \
             || { echo "guest containerDisk image missing from containerd" >&2; exit 1; }
 
-      - name: Run KubeVirt provider e2e suite
+      - name: Run KubeVirt provider + rollout e2e suites
         env:
           # cert-manager is already installed by the workflow step above, so
           # tell the suite to skip both its BeforeSuite install and (crucially)
@@ -185,13 +190,21 @@ jobs:
           CERT_MANAGER_INSTALL_SKIP: "true"
         run: |
           set -euo pipefail
-          # The suite's BeforeSuite builds + imports the operator image; the
-          # kubevirt-e2e spec's BeforeAll runs `make install` / `make deploy`.
+          # The suite's BeforeSuite builds + imports the operator image; each
+          # labeled spec's own BeforeAll runs `make install` / `make deploy`
+          # (idempotent, so both specs deploying it in the same run is safe).
           # cert-manager is pre-installed by the workflow and left untouched by
-          # the suite (CERT_MANAGER_INSTALL_SKIP above). We only focus the
-          # labeled spec on the pre-provisioned k3s cluster and hand it the
-          # guest containerDisk tag via E2E_ROUTER_CONTAINERDISK (job level).
-          make test-e2e E2E_CLUSTER=k3s GINKGO_LABEL_FILTER=kubevirt-e2e
+          # the suite (CERT_MANAGER_INSTALL_SKIP above). We focus both labeled
+          # specs on the pre-provisioned k3s cluster and hand them the guest
+          # containerDisk tag via E2E_ROUTER_CONTAINERDISK (job level).
+          # E2E_TIMEOUT is raised from the Makefile's 35m default: rollout-e2e
+          # alone boots two VMs and runs four multi-minute specs on top of
+          # kubevirt-e2e's own budget, so the combined `go test` binary needs
+          # more headroom than the Kind-path default assumes. Keep this below
+          # the job's timeout-minutes above so a genuine hang is reported by
+          # `go test`'s own timeout (with goroutine dumps) rather than by the
+          # runner being killed.
+          make test-e2e E2E_CLUSTER=k3s GINKGO_LABEL_FILTER='kubevirt-e2e || rollout-e2e' E2E_TIMEOUT=60m
 
       - name: Collect diagnostics on failure
         if: failure()
@@ -202,12 +215,17 @@ jobs:
           kubectl get pods -A -o wide
           kubectl -n kubevirt get kubevirt kubevirt -o yaml
           echo "----- vrouter CRs -----"
-          kubectl get vrouterconfigs,vroutertargets -A -o wide
+          kubectl get vrouterconfigs,vroutertargets,vrouterbindings,vroutertemplates -A -o wide
           echo "----- VM/VMI describe (default ns) -----"
           kubectl -n default describe vm 2>/dev/null | tail -n 80
           kubectl -n default describe vmi 2>/dev/null | tail -n 80
-          LAUNCHER="$(kubectl -n default get pod -l kubevirt.io=virt-launcher -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)"
-          [ -n "$LAUNCHER" ] && kubectl -n default logs "$LAUNCHER" --all-containers --tail=100
+          # rollout-e2e boots up to two VMs concurrently (kubevirt-e2e's own VM
+          # is freed by then), so dump every virt-launcher pod's logs, not just
+          # the first.
+          for LAUNCHER in $(kubectl -n default get pod -l kubevirt.io=virt-launcher -o jsonpath='{.items[*].metadata.name}' 2>/dev/null); do
+            echo "----- virt-launcher pod: ${LAUNCHER} -----"
+            kubectl -n default logs "$LAUNCHER" --all-containers --tail=100
+          done
           echo "----- controller-manager logs -----"
           kubectl -n vrouter-operator-system get pods -o wide
           kubectl -n vrouter-operator-system logs deployment/vrouter-operator-controller-manager --all-containers --tail=200

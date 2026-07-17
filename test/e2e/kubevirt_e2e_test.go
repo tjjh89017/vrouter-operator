@@ -53,6 +53,28 @@ import (
 // Guard: the whole suite is skipped unless E2E_CLUSTER=k3s, because it needs a
 // real KubeVirt + KVM node. The default Kind suite must never run it.
 //
+// Shared timing budgets. Package-level (rather than per-Describe-local) so
+// both this suite and the rollout-e2e suite (test/e2e/rollout_e2e_test.go),
+// which boots VMs and drives applies the same way, use identical, generous
+// windows instead of drifting copies. NEVER assert once against a live
+// cluster — every check that reads these uses Eventually/Consistently.
+const (
+	// vmReadyTimeout is the generous first-boot budget: guest boot +
+	// qemu-guest-agent coming up on hardware-accelerated KVM.
+	vmReadyTimeout = 10 * time.Minute
+	// applyTimeout is the generous apply budget. The guest's router unit is a
+	// oneshot that only settles to active(exited) ~15s AFTER AgentConnected,
+	// and CheckReady polls SubState until "exited" before dispatching — so the
+	// operator may legitimately spend minutes before Applied.
+	applyTimeout = 10 * time.Minute
+	applyPoll    = 15 * time.Second
+	// failTimeout is the failure-path budget. A genuine commit-time rejection
+	// surfaces within seconds of the operator dispatching the exec, so the
+	// generous 10m applyTimeout only wastes CI time here — 4m still absorbs
+	// scheduling/QGA latency while failing fast if the config is wrong.
+	failTimeout = 4 * time.Minute
+)
+
 // Structured so item E3 can append a failure-path It(...) to the same Describe.
 var _ = Describe("KubeVirt provider data path", Ordered, Label("kubevirt-e2e"), func() {
 	const (
@@ -75,21 +97,6 @@ var _ = Describe("KubeVirt provider data path", Ordered, Label("kubevirt-e2e"), 
 		// committed, the guest's live hostname reflects it. Kept purely
 		// alphanumeric to stay within the router's host-name validation.
 		appliedHostname = "vre2ehost"
-
-		// Generous first-boot budget: guest boot + qemu-guest-agent coming up on
-		// hardware-accelerated KVM.
-		vmReadyTimeout = 10 * time.Minute
-		// Generous apply budget. The guest's router unit is a oneshot that only
-		// settles to active(exited) ~15s AFTER AgentConnected, and CheckReady
-		// polls SubState until "exited" before dispatching — so the operator may
-		// legitimately spend minutes before Applied. NEVER assert once.
-		applyTimeout = 10 * time.Minute
-		applyPoll    = 15 * time.Second
-		// failTimeout is the failure-path budget. A genuine commit-time rejection
-		// surfaces within seconds of the operator dispatching the exec, so the
-		// generous 10m applyTimeout only wastes CI time here — 4m still absorbs
-		// scheduling/QGA latency while failing fast if the config is wrong.
-		failTimeout = 4 * time.Minute
 	)
 
 	var (
@@ -116,68 +123,12 @@ var _ = Describe("KubeVirt provider data path", Ordered, Label("kubevirt-e2e"), 
 		}
 		qgaDomain = fmt.Sprintf("%s_%s", kvNamespace, vmName)
 
-		// Ensure the operator is installed and running. This suite is designed to
-		// be run on its own (the k3s CI job focuses --label=kubevirt-e2e), so it
-		// deploys the operator itself rather than depending on the Kind-oriented
-		// "Manager" suite's ordering. make install / make deploy are idempotent
-		// `kubectl apply`s (make deploy also creates the operator namespace).
-		By("installing CRDs")
-		_, err := utils.Run(exec.Command("make", "install"))
-		Expect(err).NotTo(HaveOccurred(), "Failed to install CRDs")
+		// This suite is designed to be run on its own (the k3s CI job focuses
+		// --label=kubevirt-e2e), so it deploys the operator itself rather than
+		// depending on the Kind-oriented "Manager" suite's ordering.
+		deployOperator()
 
-		By("deploying the controller-manager")
-		_, err = utils.Run(exec.Command("make", "deploy", fmt.Sprintf("IMG=%s", projectImage)))
-		Expect(err).NotTo(HaveOccurred(), "Failed to deploy the controller-manager")
-
-		By("waiting for the controller-manager deployment to be Available")
-		Eventually(func(g Gomega) {
-			cmd := exec.Command("kubectl", "wait",
-				"deployment.apps/vrouter-operator-controller-manager",
-				"--for", "condition=Available",
-				"--namespace", namespace,
-				"--timeout", "60s",
-			)
-			_, err := utils.Run(cmd)
-			g.Expect(err).NotTo(HaveOccurred())
-		}, 5*time.Minute, 10*time.Second).Should(Succeed())
-
-		By("creating the guest virtual-router VirtualMachine")
-		Expect(applyManifest(virtualMachineManifest(vmName, kvNamespace, routerContainerDisk))).
-			To(Succeed(), "Failed to create the VirtualMachine")
-
-		By("waiting for the VM to become Ready (VMI created + running)")
-		Eventually(func(g Gomega) {
-			cmd := exec.Command("kubectl", "-n", kvNamespace, "wait",
-				fmt.Sprintf("vm/%s", vmName),
-				"--for", "condition=Ready",
-				"--timeout", "60s",
-			)
-			_, err := utils.Run(cmd)
-			g.Expect(err).NotTo(HaveOccurred())
-		}, vmReadyTimeout, 15*time.Second).Should(Succeed())
-
-		By("waiting for the qemu-guest-agent to connect (VMI AgentConnected)")
-		Eventually(func(g Gomega) {
-			cmd := exec.Command("kubectl", "-n", kvNamespace, "wait",
-				fmt.Sprintf("vmi/%s", vmName),
-				"--for", "condition=AgentConnected",
-				"--timeout", "60s",
-			)
-			_, err := utils.Run(cmd)
-			g.Expect(err).NotTo(HaveOccurred())
-		}, vmReadyTimeout, 15*time.Second).Should(Succeed())
-
-		By("locating the virt-launcher pod for QGA verification")
-		Eventually(func(g Gomega) {
-			cmd := exec.Command("kubectl", "-n", kvNamespace, "get", "pod",
-				"-l", fmt.Sprintf("vm.kubevirt.io/name=%s", vmName),
-				"-o", "jsonpath={.items[0].metadata.name}",
-			)
-			out, err := utils.Run(cmd)
-			g.Expect(err).NotTo(HaveOccurred())
-			launcherPod = strings.TrimSpace(out)
-			g.Expect(launcherPod).NotTo(BeEmpty(), "virt-launcher pod not found yet")
-		}).Should(Succeed())
+		launcherPod = bootRouterVM(kvNamespace, vmName, routerContainerDisk)
 	})
 
 	AfterAll(func() {
@@ -286,6 +237,86 @@ var _ = Describe("KubeVirt provider data path", Ordered, Label("kubevirt-e2e"), 
 	})
 })
 
+// deployOperator installs the CRDs and deploys the controller-manager, then
+// waits for its Deployment to report condition=Available. Shared by every
+// k3s-only e2e suite's BeforeAll (kubevirt-e2e and rollout-e2e): each suite is
+// designed to run standalone (the k3s CI job focuses one ginkgo label at a
+// time), so each deploys the operator itself rather than depending on the
+// Kind-oriented "Manager" suite's ordering. make install / make deploy are
+// idempotent `kubectl apply`s (make deploy also creates the operator
+// namespace), so calling this from more than one suite in the same run is
+// safe.
+func deployOperator() {
+	By("installing CRDs")
+	_, err := utils.Run(exec.Command("make", "install"))
+	Expect(err).NotTo(HaveOccurred(), "Failed to install CRDs")
+
+	By("deploying the controller-manager")
+	_, err = utils.Run(exec.Command("make", "deploy", fmt.Sprintf("IMG=%s", projectImage)))
+	Expect(err).NotTo(HaveOccurred(), "Failed to deploy the controller-manager")
+
+	By("waiting for the controller-manager deployment to be Available")
+	Eventually(func(g Gomega) {
+		cmd := exec.Command("kubectl", "wait",
+			"deployment.apps/vrouter-operator-controller-manager",
+			"--for", "condition=Available",
+			"--namespace", namespace,
+			"--timeout", "60s",
+		)
+		_, err := utils.Run(cmd)
+		g.Expect(err).NotTo(HaveOccurred())
+	}, 5*time.Minute, 10*time.Second).Should(Succeed())
+}
+
+// bootRouterVM creates a VirtualMachine named vmName (booting image) in ns,
+// waits for it to reach condition=Ready and its VMI to reach
+// condition=AgentConnected, then locates and returns its virt-launcher pod
+// name for QGA use. Shared by kubevirt-e2e's single-VM BeforeAll,
+// rollout-e2e's two-VM BeforeAll, and rollout-e2e's delete+recreate
+// reboot-re-dispatch spec, so the (generous, hardware-KVM-sized) boot budget
+// and polling behavior can never drift between callers.
+func bootRouterVM(ns, vmName, image string) string { //nolint:unparam // ns kept explicit for reuse
+	By(fmt.Sprintf("creating the guest virtual-router VirtualMachine %s", vmName))
+	Expect(applyManifest(virtualMachineManifest(vmName, ns, image))).
+		To(Succeed(), fmt.Sprintf("Failed to create the VirtualMachine %s", vmName))
+
+	By(fmt.Sprintf("waiting for %s to become Ready (VMI created + running)", vmName))
+	Eventually(func(g Gomega) {
+		cmd := exec.Command("kubectl", "-n", ns, "wait",
+			fmt.Sprintf("vm/%s", vmName),
+			"--for", "condition=Ready",
+			"--timeout", "60s",
+		)
+		_, err := utils.Run(cmd)
+		g.Expect(err).NotTo(HaveOccurred())
+	}, vmReadyTimeout, 15*time.Second).Should(Succeed())
+
+	By(fmt.Sprintf("waiting for the qemu-guest-agent to connect on %s (VMI AgentConnected)", vmName))
+	Eventually(func(g Gomega) {
+		cmd := exec.Command("kubectl", "-n", ns, "wait",
+			fmt.Sprintf("vmi/%s", vmName),
+			"--for", "condition=AgentConnected",
+			"--timeout", "60s",
+		)
+		_, err := utils.Run(cmd)
+		g.Expect(err).NotTo(HaveOccurred())
+	}, vmReadyTimeout, 15*time.Second).Should(Succeed())
+
+	var launcherPod string
+	By(fmt.Sprintf("locating the virt-launcher pod for %s (QGA verification)", vmName))
+	Eventually(func(g Gomega) {
+		cmd := exec.Command("kubectl", "-n", ns, "get", "pod",
+			"-l", fmt.Sprintf("vm.kubevirt.io/name=%s", vmName),
+			"-o", "jsonpath={.items[0].metadata.name}",
+		)
+		out, err := utils.Run(cmd)
+		g.Expect(err).NotTo(HaveOccurred())
+		launcherPod = strings.TrimSpace(out)
+		g.Expect(launcherPod).NotTo(BeEmpty(), "virt-launcher pod not found yet")
+	}).Should(Succeed())
+	return launcherPod
+}
+
 // virtualMachineManifest renders a KubeVirt VirtualMachine (runStrategy=Always)
 // booting the given containerDisk image as the guest virtual router. A real VM
 // (not a bare VMI) so it exercises the same object the operator targets by name.
@@ -310,7 +341,7 @@ spec:
           type: q35
         resources:
           requests:
-            memory: 2Gi
+            memory: 1Gi
         devices:
           disks:
             - name: containerdisk
@@ -339,6 +370,84 @@ spec:
       name: %[3]s
       namespace: %[2]s
 `, name, ns, vmName)
+}
+
+// vrouterTargetWithParamsManifest renders a VRouterTarget like
+// vrouterTargetManifest, plus spec.params.hostname — the highest-priority
+// params layer (SPEC §7.1/§4.2), for use with a VRouterBinding whose template
+// renders `{{ .hostname }}` (vrouterTemplateManifest below). Kept as a
+// separate helper rather than changing vrouterTargetManifest's signature, so
+// existing kubevirt-e2e callers are unaffected.
+//
+//nolint:unparam // ns mirrors vrouterTargetManifest's signature
+func vrouterTargetWithParamsManifest(name, ns, vmName, hostname string) string {
+	return fmt.Sprintf(`apiVersion: vrouter.kojuro.date/v1
+kind: VRouterTarget
+metadata:
+  name: %[1]s
+  namespace: %[2]s
+spec:
+  provider:
+    type: kubevirt
+    kubevirt:
+      name: %[3]s
+      namespace: %[2]s
+  params:
+    hostname: "%[4]s"
+`, name, ns, vmName, hostname)
+}
+
+// vrouterTemplateManifest renders a VRouterTemplate whose commands render a
+// system host-name from a `hostname` param — the binding-driven counterpart
+// to vrouterConfigManifest's direct `commands`, used by the rollout-e2e specs
+// (test/e2e/rollout_e2e_test.go) together with vrouterTargetWithParamsManifest
+// and vrouterBindingManifest.
+func vrouterTemplateManifest(name, ns string) string {
+	return fmt.Sprintf(`apiVersion: vrouter.kojuro.date/v1
+kind: VRouterTemplate
+metadata:
+  name: %[1]s
+  namespace: %[2]s
+spec:
+  commands: |
+    set system host-name '{{ .hostname }}'
+`, name, ns)
+}
+
+// vrouterBindingManifest renders a VRouterBinding referencing templateName
+// (spec.templateRef) and targetNames in order (spec.targetRefs). rollout, if
+// non-empty, is a pre-indented YAML fragment starting with "  rollout:\n"
+// that is inserted verbatim after targetRefs — letting callers express any of
+// the three rollout modes (SPEC §7.1) without this helper needing mode-
+// specific parameters. An empty rollout omits spec.rollout entirely, i.e.
+// RolloutModeDisabled (the zero value). See rolloutWaitForAppliedFragment and
+// rolloutFixedIntervalFragment for the two thin wrappers rollout-e2e uses.
+func vrouterBindingManifest(name, ns, templateName string, targetNames []string, rollout string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "apiVersion: vrouter.kojuro.date/v1\n")
+	fmt.Fprintf(&b, "kind: VRouterBinding\n")
+	fmt.Fprintf(&b, "metadata:\n  name: %s\n  namespace: %s\n", name, ns)
+	fmt.Fprintf(&b, "spec:\n")
+	fmt.Fprintf(&b, "  templateRef:\n    name: %s\n", templateName)
+	fmt.Fprintf(&b, "  targetRefs:\n")
+	for _, t := range targetNames {
+		fmt.Fprintf(&b, "    - name: %s\n", t)
+	}
+	b.WriteString(rollout)
+	return b.String()
+}
+
+// rolloutWaitForAppliedFragment renders the spec.rollout YAML fragment for
+// mode: WaitForApplied (SPEC §7.1), for use with vrouterBindingManifest.
+func rolloutWaitForAppliedFragment(pollInterval, waitAfterApplied string) string {
+	return fmt.Sprintf("  rollout:\n    mode: WaitForApplied\n    pollInterval: %s\n    waitAfterApplied: %s\n",
+		pollInterval, waitAfterApplied)
+}
+
+// rolloutFixedIntervalFragment renders the spec.rollout YAML fragment for
+// mode: FixedInterval (SPEC §7.1), for use with vrouterBindingManifest.
+func rolloutFixedIntervalFragment(waitInterval string) string {
+	return fmt.Sprintf("  rollout:\n    mode: FixedInterval\n    waitInterval: %s\n", waitInterval)
 }
 
 // vrouterConfigManifest renders a VRouterConfig that sets a deterministic system
@@ -411,6 +520,34 @@ func getJSONPath(g Gomega, configName, jsonpath string) string {
 	return strings.TrimSpace(out)
 }
 
+// getJSONPathTolerant behaves like getJSONPath but returns "" instead of
+// failing the enclosing Eventually/Consistently block when the named
+// VRouterConfig does not exist (yet, or ever) — used by rollout-e2e's
+// Consistently windows that sample a downstream target's generated config
+// before/while asserting the rollout walk has not written it (SPEC §7.1's
+// "at most one target's VRouterConfig is being written" invariant).
+// --ignore-not-found makes kubectl exit 0 with empty output for a missing
+// object instead of erroring, so a genuine kubectl failure (bad flag,
+// unreachable apiserver) still fails the assertion via g.Expect(err).
+func getJSONPathTolerant(g Gomega, configName, jsonpath string) string {
+	cmd := exec.Command("kubectl", "-n", "default", "get", "vrouterconfig", configName,
+		"--ignore-not-found", "-o", fmt.Sprintf("jsonpath=%s", jsonpath))
+	out, err := utils.Run(cmd)
+	g.Expect(err).NotTo(HaveOccurred())
+	return strings.TrimSpace(out)
+}
+
+// getBindingField reads a jsonpath expression off the named VRouterBinding,
+// failing the enclosing Eventually/Consistently block (via the supplied
+// Gomega) on error. Sibling of getJSONPath, which reads VRouterConfigs.
+func getBindingField(g Gomega, name, jsonpath string) string {
+	cmd := exec.Command("kubectl", "-n", "default", "get", "vrouterbinding", name,
+		"-o", fmt.Sprintf("jsonpath=%s", jsonpath))
+	out, err := utils.Run(cmd)
+	g.Expect(err).NotTo(HaveOccurred())
+	return strings.TrimSpace(out)
+}
+
 // guestExecCommand is a qemu-guest-agent guest-exec request.
 type guestExecCommand struct {
 	Execute   string             `json:"execute"`
@@ -456,7 +593,7 @@ func qgaGuestExec(ns, launcher, domain, path string, args ...string) (string, er
 		return "", fmt.Errorf("no pid in guest-exec response: %s", resp)
 	}
 
-	for i := 0; i < 120; i++ {
+	for range 120 {
 		statusPayload := fmt.Sprintf(`{"execute":"guest-exec-status","arguments":{"pid":%d}}`, pidResp.Return.Pid)
 		statusResp, err := virshQGA(ns, launcher, domain, statusPayload)
 		if err != nil {
