@@ -162,7 +162,7 @@ endif
 
 .PHONY: test-e2e
 test-e2e: setup-test-e2e manifests generate fmt vet ## Run the e2e tests. Expected an isolated Kind environment, or a pre-provisioned cluster via E2E_CLUSTER.
-	KIND_CLUSTER=$(KIND_CLUSTER) E2E_CLUSTER=$(E2E_CLUSTER) go test ./test/e2e/ -v -ginkgo.v -timeout $(E2E_TIMEOUT) $(if $(GINKGO_LABEL_FILTER),-ginkgo.label-filter=$(GINKGO_LABEL_FILTER),)
+	KIND_CLUSTER=$(KIND_CLUSTER) E2E_CLUSTER=$(E2E_CLUSTER) go test ./test/e2e/ -v -ginkgo.v -timeout $(E2E_TIMEOUT) $(if $(GINKGO_LABEL_FILTER),"-ginkgo.label-filter=$(GINKGO_LABEL_FILTER)",)
 	$(MAKE) cleanup-test-e2e E2E_CLUSTER=$(E2E_CLUSTER)
 
 .PHONY: cleanup-test-e2e
