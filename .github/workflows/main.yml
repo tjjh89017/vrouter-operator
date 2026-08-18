@@ -1,0 +1,93 @@
+name: CI
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  # Weekly canary against the latest DozenOS nightly guest.
+  schedule:
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  K3S_VERSION: "v1.33.13+k3s1"
+  KUBEVIRT_VERSION: "v1.8.4"
+  # Must match certmanagerVersion in test/utils/utils.go.
+  CERT_MANAGER_VERSION: "v1.16.3"
+  # Point at a specific release's version.json to pin the guest image.
+  DOZENOS_VERSION_JSON_URL: "https://github.com/dozenos/dozenos-nightly-build/releases/latest/download/version.json"
+  E2E_ROUTER_CONTAINERDISK: "dozenos-e2e:latest"
+
+jobs:
+  codegen:
+    name: Codegen
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/codegen
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/lint
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/test
+
+  e2e-kubevirt:
+    name: E2E KubeVirt
+    runs-on: ubuntu-latest
+    timeout-minutes: 70
+    needs:
+      - codegen
+      - lint
+      - test
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/e2e-kubevirt
+        with:
+          k3s-version: ${{ env.K3S_VERSION }}
+          kubevirt-version: ${{ env.KUBEVIRT_VERSION }}
+          cert-manager-version: ${{ env.CERT_MANAGER_VERSION }}
+          dozenos-version-json-url: ${{ env.DOZENOS_VERSION_JSON_URL }}
+          router-containerdisk: ${{ env.E2E_ROUTER_CONTAINERDISK }}
+
+  # One stable check the ruleset can require for the e2e stage.
+  e2e-required:
+    name: E2E
+    runs-on: ubuntu-latest
+    needs: e2e-kubevirt
+    if: always()
+    steps:
+      - name: All e2e suites passed
+        run: '[ "${{ needs.e2e-kubevirt.result }}" = "success" ]'
+
+  docker:
+    # Publish only on real pushes to main; tags are handled by release.yml.
+    if: github.event_name == 'push'
+    name: Build and push image
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    # e2e-required transitively covers codegen/lint/test via e2e-kubevirt's gates.
+    needs: e2e-required
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/docker
+        with:
+          ghcr-token: ${{ secrets.GITHUB_TOKEN }}

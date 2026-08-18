@@ -1,0 +1,76 @@
+name: Release
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  # No lint/test: the tagged main commit already passed the full CI workflow.
+
+  # Creates the draft up front so the upload jobs below only ever find it.
+  create-release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - name: Create draft release
+        uses: softprops/action-gh-release@v3
+        with:
+          draft: true
+          prerelease: >-
+            ${{
+              contains(github.ref_name, 'RC') ||
+              contains(github.ref_name, 'rc')
+            }}
+
+  release-manifests:
+    name: Release Manifests
+    runs-on: ubuntu-latest
+    needs:
+      - create-release
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Cache tool binaries
+        uses: actions/cache@v6
+        with:
+          path: bin
+          key: ${{ runner.os }}-tools-${{ hashFiles('Makefile', 'go.mod') }}
+      - name: Build installer manifest
+        run: |
+          make build-installer IMG="ghcr.io/${{ github.repository }}:${GITHUB_REF_NAME#v}"
+      - name: Package Helm chart
+        run: helm package charts/vrouter-operator
+      - name: Release
+        uses: softprops/action-gh-release@v3
+        with:
+          files: |
+            dist/install.yaml
+            vrouter-operator-*.tgz
+          draft: true
+          prerelease: >-
+            ${{
+              contains(github.ref_name, 'RC') ||
+              contains(github.ref_name, 'rc')
+            }}
+
+  docker:
+    name: Build and push image
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    needs:
+      - create-release
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/docker
+        with:
+          ghcr-token: ${{ secrets.GITHUB_TOKEN }}

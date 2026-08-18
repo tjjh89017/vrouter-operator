@@ -1,0 +1,19 @@
+name: 'Test'
+description: 'Run unit tests via envtest'
+
+runs:
+  using: 'composite'
+  steps:
+    - uses: actions/setup-go@v7
+      with:
+        go-version-file: go.mod
+
+    - name: Cache tool binaries
+      uses: actions/cache@v6
+      with:
+        path: bin
+        key: ${{ runner.os }}-tools-${{ hashFiles('Makefile', 'go.mod') }}
+
+    - name: Run tests
+      shell: bash
+      run: make test
