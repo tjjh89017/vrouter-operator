@@ -1,0 +1,26 @@
+name: 'Codegen'
+description: 'Verify generated manifests and deepcopy code are up to date'
+
+runs:
+  using: 'composite'
+  steps:
+    - uses: actions/setup-go@v7
+      with:
+        go-version-file: go.mod
+
+    - name: Cache tool binaries
+      uses: actions/cache@v6
+      with:
+        path: bin
+        key: ${{ runner.os }}-tools-${{ hashFiles('Makefile', 'go.mod') }}
+
+    - name: Generate manifests and code
+      shell: bash
+      run: make manifests generate
+
+    - name: git diff
+      shell: bash
+      run: |
+        git add -N .
+        git diff --compact-summary --exit-code || \
+          (echo; echo "Unexpected difference after code generation. Run 'make manifests generate' and commit."; exit 1)

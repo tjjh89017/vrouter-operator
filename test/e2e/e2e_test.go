@@ -42,7 +42,7 @@ const metricsServiceName = "vrouter-operator-controller-manager-metrics-service"
 // metricsRoleBindingName is the name of the RBAC that will be created to allow get the metrics data
 const metricsRoleBindingName = "vrouter-operator-metrics-binding"
 
-var _ = Describe("Manager", Ordered, func() {
+var _ = Describe("Manager", Ordered, Label("manager-e2e"), func() {
 	var controllerPodName string
 
 	// Before running the tests, set up the environment by creating the namespace,

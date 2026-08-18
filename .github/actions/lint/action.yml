@@ -1,0 +1,14 @@
+name: 'Lint Code'
+description: 'Run golangci-lint on the codebase'
+
+runs:
+  using: 'composite'
+  steps:
+    - uses: actions/setup-go@v7
+      with:
+        go-version-file: go.mod
+
+    - name: golangci-lint
+      uses: golangci/golangci-lint-action@v9
+      with:
+        version: latest

@@ -1,0 +1,174 @@
+name: 'E2E KubeVirt'
+description: >-
+  Stand up k3s + KubeVirt + a real DozenOS containerDisk guest on hardware KVM
+  and run the labeled ginkgo e2e suites
+
+# Acceptance gate for issue #38 (kubevirt-e2e) and issue #35 (rollout-e2e).
+# The suite owns operator image build/import and `make install`/`make deploy`;
+# this action only provisions the cluster stack. cert-manager is installed
+# here (un-contended node) and the suite skips it via CERT_MANAGER_INSTALL_SKIP.
+# Hardware virtualization is required — fails fast without /dev/kvm.
+
+inputs:
+  k3s-version:
+    description: 'k3s version to install'
+    required: true
+  kubevirt-version:
+    description: 'KubeVirt release (operator + CR + matching virtctl)'
+    required: true
+  cert-manager-version:
+    description: 'cert-manager release; must match test/utils/utils.go'
+    required: true
+  dozenos-version-json-url:
+    description: 'DozenOS version.json URL (latest nightly by default)'
+    required: true
+  router-containerdisk:
+    description: 'Guest containerDisk tag surfaced via E2E_ROUTER_CONTAINERDISK'
+    required: true
+
+runs:
+  using: 'composite'
+  steps:
+    - uses: actions/setup-go@v7
+      with:
+        go-version-file: go.mod
+
+    - name: Enable KVM access via udev rule
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+          | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+        sudo udevadm control --reload-rules
+        sudo udevadm trigger --name-match=kvm
+
+    - name: Require /dev/kvm (fail fast if absent)
+      shell: bash
+      run: |
+        set -euo pipefail
+        if [ -e /dev/kvm ]; then
+          ls -l /dev/kvm
+        else
+          echo "::error::/dev/kvm not present — hardware virtualization is required." >&2
+          exit 1
+        fi
+
+    - name: Raise inotify limits
+      shell: bash
+      run: |
+        set -euo pipefail
+        sudo sysctl fs.inotify.max_user_watches=1048576
+        sudo sysctl fs.inotify.max_user_instances=8192
+
+    - name: Install k3s (pinned)
+      shell: bash
+      env:
+        K3S_VERSION: ${{ inputs.k3s-version }}
+      run: |
+        set -euo pipefail
+        curl -sfL https://get.k3s.io \
+          | INSTALL_K3S_VERSION="${K3S_VERSION}" sh -s - --write-kubeconfig-mode 644
+        echo "KUBECONFIG=/etc/rancher/k3s/k3s.yaml" >> "$GITHUB_ENV"
+        export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+        kubectl wait --for=condition=Ready node --all --timeout=120s
+        kubectl get nodes -o wide
+
+    - name: Install cert-manager (pinned)
+      shell: bash
+      env:
+        CERT_MANAGER_VERSION: ${{ inputs.cert-manager-version }}
+      run: |
+        set -euo pipefail
+        kubectl apply -f "https://github.com/cert-manager/cert-manager/releases/download/${CERT_MANAGER_VERSION}/cert-manager.yaml"
+        kubectl -n cert-manager rollout status deployment/cert-manager --timeout=8m
+        kubectl -n cert-manager rollout status deployment/cert-manager-webhook --timeout=8m
+        kubectl -n cert-manager rollout status deployment/cert-manager-cainjector --timeout=8m
+        kubectl -n cert-manager get pods -o wide
+
+    - name: Install KubeVirt (pinned) and virtctl
+      shell: bash
+      env:
+        KUBEVIRT_VERSION: ${{ inputs.kubevirt-version }}
+      run: |
+        set -euo pipefail
+        kubectl apply -f "https://github.com/kubevirt/kubevirt/releases/download/${KUBEVIRT_VERSION}/kubevirt-operator.yaml"
+        kubectl -n kubevirt rollout status deployment/virt-operator --timeout=300s
+        kubectl apply -f "https://github.com/kubevirt/kubevirt/releases/download/${KUBEVIRT_VERSION}/kubevirt-cr.yaml"
+        kubectl -n kubevirt wait kubevirt/kubevirt --for=condition=Available --timeout=10m
+
+        curl -sfL -o virtctl \
+          "https://github.com/kubevirt/kubevirt/releases/download/${KUBEVIRT_VERSION}/virtctl-${KUBEVIRT_VERSION}-linux-amd64"
+        chmod +x virtctl
+        sudo mv virtctl /usr/local/bin/virtctl
+        virtctl version || true
+
+    - name: Build & import DozenOS guest containerDisk
+      shell: bash
+      env:
+        DOZENOS_VERSION_JSON_URL: ${{ inputs.dozenos-version-json-url }}
+        E2E_ROUTER_CONTAINERDISK: ${{ inputs.router-containerdisk }}
+      run: |
+        set -euo pipefail
+        work="${RUNNER_TEMP}/dozenos"
+        mkdir -p "$work"
+
+        curl -sfL "${DOZENOS_VERSION_JSON_URL}" -o "$work/version.json"
+
+        sel='.artifacts[] | select(.flavor=="kvm" and .format=="qcow2" and .install_type=="fresh-install")'
+        version="$(jq -r '.version' "$work/version.json")"
+        url="$(jq -r "$sel | .url"     "$work/version.json")"
+        sha="$(jq -r "$sel | .sha256"  "$work/version.json")"
+
+        echo "DozenOS version: ${version}"
+        echo "Artifact url:    ${url}"
+
+        if [ -z "$url" ] || [ "$url" = "null" ]; then
+          echo "No kvm/qcow2 fresh-install artifact found in version.json" >&2
+          exit 1
+        fi
+
+        curl -sfL "$url" -o "$work/disk.qcow2"
+        echo "${sha}  ${work}/disk.qcow2" | sha256sum -c -
+
+        cat > "$work/Dockerfile" <<'DOCKERFILE'
+        FROM scratch
+        ADD --chown=107:107 disk.qcow2 /disk/
+        DOCKERFILE
+
+        docker build -t "${E2E_ROUTER_CONTAINERDISK}" "$work"
+        docker save "${E2E_ROUTER_CONTAINERDISK}" | sudo k3s ctr images import -
+        sudo k3s ctr images ls | grep -i "dozenos-e2e" \
+          || { echo "guest containerDisk image missing from containerd" >&2; exit 1; }
+
+    - name: Run KubeVirt provider + rollout e2e suites
+      shell: bash
+      env:
+        CERT_MANAGER_INSTALL_SKIP: "true"
+        E2E_ROUTER_CONTAINERDISK: ${{ inputs.router-containerdisk }}
+      run: |
+        set -euo pipefail
+        # E2E_TIMEOUT stays below the caller job's timeout-minutes so a hang
+        # is reported by `go test` (with goroutine dumps), not a runner kill.
+        make test-e2e E2E_CLUSTER=k3s GINKGO_LABEL_FILTER='manager-e2e || kubevirt-e2e || rollout-e2e' E2E_TIMEOUT=60m
+
+    - name: Collect diagnostics on failure
+      if: failure()
+      shell: bash
+      run: |
+        set +e
+        echo "===== DIAGNOSTICS ====="
+        kubectl get vm,vmi -A -o wide
+        kubectl get pods -A -o wide
+        kubectl -n kubevirt get kubevirt kubevirt -o yaml
+        echo "----- vrouter CRs -----"
+        kubectl get vrouterconfigs,vroutertargets,vrouterbindings,vroutertemplates -A -o wide
+        echo "----- VM/VMI describe (default ns) -----"
+        kubectl -n default describe vm 2>/dev/null | tail -n 80
+        kubectl -n default describe vmi 2>/dev/null | tail -n 80
+        for LAUNCHER in $(kubectl -n default get pod -l kubevirt.io=virt-launcher -o jsonpath='{.items[*].metadata.name}' 2>/dev/null); do
+          echo "----- virt-launcher pod: ${LAUNCHER} -----"
+          kubectl -n default logs "$LAUNCHER" --all-containers --tail=100
+        done
+        echo "----- controller-manager logs -----"
+        kubectl -n vrouter-operator-system get pods -o wide
+        kubectl -n vrouter-operator-system logs deployment/vrouter-operator-controller-manager --all-containers --tail=200
