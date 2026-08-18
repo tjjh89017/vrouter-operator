@@ -2,7 +2,7 @@
 
 A Kubernetes Operator that manages the virtual router configuration running on KubeVirt, Proxmox VE, or bare-metal via the vrouter-daemon gRPC agent. Configuration is delivered via QEMU Guest Agent (QGA) over a virtio channel or gRPC - no network reachability or sidecar injection required.
 
-vRouter-Operator is a community project for managing virtual routers across Kubernetes/KubeVirt, Proxmox VE, and bare-metal deployments.
+vRouter-Operator is a community project for managing virtual routers across Kubernetes/KubeVirt, Proxmox VE, and bare-metal deployments. Supported guest OSes are [VyOS](https://vyos.io/) and [DozenOS](https://dozenos.github.io/dozenos-nightly-build/) — see [Guest OS Support](#guest-os-support).
 
 ## Demo
 
@@ -502,6 +502,17 @@ The `Applied` condition is set for `kubectl wait` support:
 ```bash
 kubectl wait vrc/<name> --for=condition=Applied --timeout=120s
 ```
+
+---
+
+## Guest OS Support
+
+| Guest OS | `/etc/os-release` ID | Router service unit | Notes |
+|----------|---------------------|---------------------|-------|
+| [VyOS](https://vyos.io/) | `vyos` | `vyos-router.service` | Validated on Harvester and Proxmox VE |
+| [DozenOS](https://dozenos.github.io/dozenos-nightly-build/) | `dozenos` | `dozenos-router.service` | Community 1:1 rebuild of VyOS rolling with freely downloadable nightly images; used by the CI e2e suite |
+
+The KubeVirt provider auto-detects the guest flavor by reading `/etc/os-release` over QGA and resolves the router service unit from its `ID` field; an unknown ID fails loudly instead of guessing. Both flavors share the same vbash/commit semantics, so templates and bindings work unchanged on either.
 
 ---
 
