@@ -70,7 +70,7 @@ func (r *ProxmoxClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		if err := r.Update(ctx, &cluster); err != nil {
 			return ctrl.Result{}, err
 		}
-		return ctrl.Result{Requeue: true}, nil
+		return ctrl.Result{RequeueAfter: time.Millisecond}, nil
 	}
 
 	return r.onChange(ctx, req, &cluster)

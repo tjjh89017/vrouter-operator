@@ -82,7 +82,7 @@ func (r *VRouterConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		if err := r.Update(ctx, &cfg); err != nil {
 			return ctrl.Result{}, err
 		}
-		return ctrl.Result{Requeue: true}, nil
+		return ctrl.Result{RequeueAfter: time.Millisecond}, nil
 	}
 
 	return r.onChange(ctx, req, &cfg)

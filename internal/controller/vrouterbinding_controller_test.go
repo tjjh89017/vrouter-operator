@@ -57,8 +57,8 @@ var _ = Describe("VRouterBinding Controller", func() {
 						Namespace: "default",
 					},
 					Spec: vrouterv1.VRouterBindingSpec{
-						TemplateRef: &vrouterv1.NameRef{Name: "test-template"},
-						TargetRefs:  []vrouterv1.NameRef{{Name: "test-target"}},
+						TemplateRefs: []vrouterv1.NameRef{{Name: "test-template"}},
+						TargetRefs:   []vrouterv1.NameRef{{Name: "test-target"}},
 					},
 				}
 				Expect(k8sClient.Create(ctx, resource)).To(Succeed())
@@ -106,7 +106,7 @@ var _ = Describe("VRouterBinding Controller", func() {
 		It("should prepend templateRef when set", func() {
 			binding := &vrouterv1.VRouterBinding{
 				Spec: vrouterv1.VRouterBindingSpec{
-					TemplateRef: &vrouterv1.NameRef{Name: "tmpl-priority"},
+					TemplateRef: &vrouterv1.NameRef{Name: "tmpl-priority"}, //nolint:staticcheck // deliberately exercises deprecated TemplateRef
 					TemplateRefs: []vrouterv1.NameRef{
 						{Name: "tmpl-a"},
 						{Name: "tmpl-b"},
@@ -123,7 +123,7 @@ var _ = Describe("VRouterBinding Controller", func() {
 		It("should return single-element list when only templateRef is set", func() {
 			binding := &vrouterv1.VRouterBinding{
 				Spec: vrouterv1.VRouterBindingSpec{
-					TemplateRef: &vrouterv1.NameRef{Name: "tmpl-only"},
+					TemplateRef: &vrouterv1.NameRef{Name: "tmpl-only"}, //nolint:staticcheck // deliberately exercises deprecated TemplateRef
 				},
 			}
 			refs := effectiveTemplateRefs(binding)
