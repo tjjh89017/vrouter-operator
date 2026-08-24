@@ -90,7 +90,7 @@ func (r *VRouterBindingReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		if err := r.Update(ctx, &binding); err != nil {
 			return ctrl.Result{}, err
 		}
-		return ctrl.Result{Requeue: true}, nil
+		return ctrl.Result{RequeueAfter: time.Millisecond}, nil
 	}
 
 	return r.onChange(ctx, req, &binding)
