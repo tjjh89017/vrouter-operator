@@ -140,7 +140,7 @@ var _ = Describe("VRouterBinding Controller", func() {
 		It("should preserve namespace from templateRef", func() {
 			binding := &vrouterv1.VRouterBinding{
 				Spec: vrouterv1.VRouterBindingSpec{
-					TemplateRef:  &vrouterv1.NameRef{Namespace: "ns-a", Name: "tmpl-a"},
+					TemplateRef:  &vrouterv1.NameRef{Namespace: "ns-a", Name: "tmpl-a"}, //nolint:staticcheck // deliberately exercises deprecated TemplateRef
 					TemplateRefs: []vrouterv1.NameRef{{Namespace: "ns-b", Name: "tmpl-b"}},
 				},
 			}
