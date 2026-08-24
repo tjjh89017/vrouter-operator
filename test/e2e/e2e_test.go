@@ -49,8 +49,12 @@ var _ = Describe("Manager", Ordered, Label("manager-e2e"), func() {
 	// enforce the restricted security policy to the namespace, installing CRDs,
 	// and deploying the controller.
 	BeforeAll(func() {
+		// Idempotent create: kubevirt-e2e/rollout-e2e may have already deployed
+		// the operator (make deploy creates this namespace), and Ginkgo
+		// randomizes top-level suite order.
 		By("creating manager namespace")
-		cmd := exec.Command("kubectl", "create", "ns", namespace)
+		cmd := exec.Command("sh", "-c",
+			"kubectl create ns "+namespace+" --dry-run=client -o yaml | kubectl apply -f -")
 		_, err := utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred(), "Failed to create namespace")
 
