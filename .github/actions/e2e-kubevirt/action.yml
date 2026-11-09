@@ -60,6 +60,15 @@ runs:
         sudo sysctl fs.inotify.max_user_watches=1048576
         sudo sysctl fs.inotify.max_user_instances=8192
 
+    # Ubuntu 26.04 sets kernel.apparmor_restrict_unprivileged_unconfined=1.
+    # From linux-azure 7.0.0-1019 the kernel stacks it as the label
+    # cri-containerd.apparmor.d//&unconfined, which blocks QEMU signalling its
+    # vCPU threads (cpus_kick_thread: Permission denied). Remove this step once
+    # k3s ships a containerd with containerd/containerd#14487.
+    - name: Work around Ubuntu 26.04 AppArmor stacking (containerd/containerd#14485)
+      shell: bash
+      run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_unconfined=0
+
     - name: Install k3s
       shell: bash
       env:
@@ -163,6 +172,8 @@ runs:
         set +e
         echo "===== DIAGNOSTICS ====="
         echo "Guest version: ${E2E_ROUTER_VERSION:-unknown}"
+        echo "Kernel: $(uname -r)"
+        sysctl kernel.apparmor_restrict_unprivileged_unconfined
         kubectl get vm,vmi -A -o wide
         kubectl get pods -A -o wide
         kubectl -n kubevirt get kubevirt kubevirt -o yaml
@@ -182,3 +193,5 @@ runs:
         kubectl -n kubevirt logs -l kubevirt.io=virt-handler --all-containers --tail=200
         echo "----- events (all namespaces) -----"
         kubectl get events -A --sort-by=.lastTimestamp
+        echo "----- AppArmor denials (dmesg) -----"
+        sudo dmesg | grep -i 'apparmor="DENIED"' || true
