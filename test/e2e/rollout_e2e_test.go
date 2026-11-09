@@ -148,6 +148,10 @@ var _ = Describe("VRouterBinding serial rollout", Ordered, Label("rollout-e2e"),
 		launcherPodB = bootRouterVM(kvNamespace, vmNameB, routerContainerDisk)
 	})
 
+	// Runs before AfterAll deletes the VMs, so a failed boot leaves VMI and
+	// virt-launcher state in the log.
+	JustAfterEach(dumpKubeVirtDiagnosticsOnFailure)
+
 	AfterAll(func() {
 		if e2eCluster != "k3s" {
 			return
