@@ -60,7 +60,7 @@ runs:
         sudo sysctl fs.inotify.max_user_watches=1048576
         sudo sysctl fs.inotify.max_user_instances=8192
 
-    - name: Install k3s (pinned)
+    - name: Install k3s
       shell: bash
       env:
         K3S_VERSION: ${{ inputs.k3s-version }}
@@ -73,7 +73,7 @@ runs:
         kubectl wait --for=condition=Ready node --all --timeout=120s
         kubectl get nodes -o wide
 
-    - name: Install cert-manager (pinned)
+    - name: Install cert-manager
       shell: bash
       env:
         CERT_MANAGER_VERSION: ${{ inputs.cert-manager-version }}
@@ -85,7 +85,7 @@ runs:
         kubectl -n cert-manager rollout status deployment/cert-manager-cainjector --timeout=8m
         kubectl -n cert-manager get pods -o wide
 
-    - name: Install KubeVirt (pinned) and virtctl
+    - name: Install KubeVirt and virtctl
       shell: bash
       env:
         KUBEVIRT_VERSION: ${{ inputs.kubevirt-version }}
