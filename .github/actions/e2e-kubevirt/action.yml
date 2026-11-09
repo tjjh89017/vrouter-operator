@@ -121,6 +121,8 @@ runs:
 
         echo "DozenOS version: ${version}"
         echo "Artifact url:    ${url}"
+        # The e2e suites print this version in their logs and diagnostics.
+        echo "E2E_ROUTER_VERSION=${version}" >> "$GITHUB_ENV"
 
         if [ -z "$url" ] || [ "$url" = "null" ]; then
           echo "No kvm/qcow2 fresh-install artifact found in version.json" >&2
@@ -151,12 +153,16 @@ runs:
         # is reported by `go test` (with goroutine dumps), not a runner kill.
         make test-e2e E2E_CLUSTER=k3s GINKGO_LABEL_FILTER='manager-e2e || kubevirt-e2e || rollout-e2e' E2E_TIMEOUT=60m
 
+    # The suites delete their VMs in AfterAll, so per-VM state (VMI describe,
+    # virt-launcher logs) comes from the suites' JustAfterEach dump in the
+    # previous step's log. This step records the cluster-wide state left over.
     - name: Collect diagnostics on failure
       if: failure()
       shell: bash
       run: |
         set +e
         echo "===== DIAGNOSTICS ====="
+        echo "Guest version: ${E2E_ROUTER_VERSION:-unknown}"
         kubectl get vm,vmi -A -o wide
         kubectl get pods -A -o wide
         kubectl -n kubevirt get kubevirt kubevirt -o yaml
@@ -172,3 +178,7 @@ runs:
         echo "----- controller-manager logs -----"
         kubectl -n vrouter-operator-system get pods -o wide
         kubectl -n vrouter-operator-system logs deployment/vrouter-operator-controller-manager --all-containers --tail=200
+        echo "----- virt-handler logs -----"
+        kubectl -n kubevirt logs -l kubevirt.io=virt-handler --all-containers --tail=200
+        echo "----- events (all namespaces) -----"
+        kubectl get events -A --sort-by=.lastTimestamp

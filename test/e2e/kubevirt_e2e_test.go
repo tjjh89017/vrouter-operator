@@ -131,6 +131,10 @@ var _ = Describe("KubeVirt provider data path", Ordered, Label("kubevirt-e2e"), 
 		launcherPod = bootRouterVM(kvNamespace, vmName, routerContainerDisk)
 	})
 
+	// Runs before AfterAll deletes the VMs, so a failed boot leaves VMI and
+	// virt-launcher state in the log.
+	JustAfterEach(dumpKubeVirtDiagnosticsOnFailure)
+
 	AfterAll(func() {
 		if e2eCluster != "k3s" {
 			return
@@ -276,7 +280,8 @@ func deployOperator() {
 // reboot-re-dispatch spec, so the (generous, hardware-KVM-sized) boot budget
 // and polling behavior can never drift between callers.
 func bootRouterVM(ns, vmName, image string) string { //nolint:unparam // ns kept explicit for reuse
-	By(fmt.Sprintf("creating the guest virtual-router VirtualMachine %s", vmName))
+	By(fmt.Sprintf("creating the guest virtual-router VirtualMachine %s from %s (guest version %q)",
+		vmName, image, os.Getenv("E2E_ROUTER_VERSION")))
 	Expect(applyManifest(virtualMachineManifest(vmName, ns, image))).
 		To(Succeed(), fmt.Sprintf("Failed to create the VirtualMachine %s", vmName))
 
