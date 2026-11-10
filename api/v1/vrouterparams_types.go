@@ -19,6 +19,7 @@ package v1
 import (
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 )
 
 // VRouterParamsSpec defines the desired state of VRouterParams.
@@ -50,5 +51,8 @@ type VRouterParamsList struct {
 }
 
 func init() {
-	SchemeBuilder.Register(&VRouterParams{}, &VRouterParamsList{})
+	SchemeBuilder.Register(func(s *runtime.Scheme) error {
+		s.AddKnownTypes(GroupVersion, &VRouterParams{}, &VRouterParamsList{})
+		return nil
+	})
 }

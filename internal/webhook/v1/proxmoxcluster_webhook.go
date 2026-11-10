@@ -20,10 +20,8 @@ import (
 	"context"
 	"fmt"
 
-	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
-	"sigs.k8s.io/controller-runtime/pkg/webhook"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	vrouterv1 "github.com/tjjh89017/vrouter-operator/api/v1"
@@ -35,7 +33,7 @@ var proxmoxclusterlog = logf.Log.WithName("proxmoxcluster-resource")
 
 // SetupProxmoxClusterWebhookWithManager registers the webhook for ProxmoxCluster in the manager.
 func SetupProxmoxClusterWebhookWithManager(mgr ctrl.Manager) error {
-	return ctrl.NewWebhookManagedBy(mgr).For(&vrouterv1.ProxmoxCluster{}).
+	return ctrl.NewWebhookManagedBy(mgr, &vrouterv1.ProxmoxCluster{}).
 		WithValidator(&ProxmoxClusterCustomValidator{}).
 		WithDefaulter(&ProxmoxClusterCustomDefaulter{}).
 		Complete()
@@ -54,15 +52,11 @@ type ProxmoxClusterCustomDefaulter struct {
 	// TODO(user): Add more fields as needed for defaulting
 }
 
-var _ webhook.CustomDefaulter = &ProxmoxClusterCustomDefaulter{}
+var _ admission.Defaulter[*vrouterv1.ProxmoxCluster] = &ProxmoxClusterCustomDefaulter{}
 
-// Default implements webhook.CustomDefaulter so a webhook will be registered for the Kind ProxmoxCluster.
-func (d *ProxmoxClusterCustomDefaulter) Default(_ context.Context, obj runtime.Object) error {
-	proxmoxcluster, ok := obj.(*vrouterv1.ProxmoxCluster)
-
-	if !ok {
-		return fmt.Errorf("expected an ProxmoxCluster object but got %T", obj)
-	}
+// Default implements admission.Defaulter so a webhook will be registered for the Kind ProxmoxCluster.
+func (d *ProxmoxClusterCustomDefaulter) Default(_ context.Context, obj *vrouterv1.ProxmoxCluster) error {
+	proxmoxcluster := obj
 	proxmoxclusterlog.Info("Defaulting for ProxmoxCluster", "name", proxmoxcluster.GetName())
 
 	// TODO(user): fill in your defaulting logic.
@@ -82,25 +76,19 @@ func (d *ProxmoxClusterCustomDefaulter) Default(_ context.Context, obj runtime.O
 type ProxmoxClusterCustomValidator struct {
 }
 
-var _ webhook.CustomValidator = &ProxmoxClusterCustomValidator{}
+var _ admission.Validator[*vrouterv1.ProxmoxCluster] = &ProxmoxClusterCustomValidator{}
 
-// ValidateCreate implements webhook.CustomValidator so a webhook will be registered for the type ProxmoxCluster.
-func (v *ProxmoxClusterCustomValidator) ValidateCreate(_ context.Context, obj runtime.Object) (admission.Warnings, error) {
-	proxmoxcluster, ok := obj.(*vrouterv1.ProxmoxCluster)
-	if !ok {
-		return nil, fmt.Errorf("expected a ProxmoxCluster object but got %T", obj)
-	}
+// ValidateCreate implements admission.Validator so a webhook will be registered for the type ProxmoxCluster.
+func (v *ProxmoxClusterCustomValidator) ValidateCreate(_ context.Context, obj *vrouterv1.ProxmoxCluster) (admission.Warnings, error) {
+	proxmoxcluster := obj
 	proxmoxclusterlog.Info("Validation for ProxmoxCluster upon creation", "name", proxmoxcluster.GetName())
 
 	return nil, validateProxmoxCluster(proxmoxcluster)
 }
 
-// ValidateUpdate implements webhook.CustomValidator so a webhook will be registered for the type ProxmoxCluster.
-func (v *ProxmoxClusterCustomValidator) ValidateUpdate(_ context.Context, _, newObj runtime.Object) (admission.Warnings, error) {
-	proxmoxcluster, ok := newObj.(*vrouterv1.ProxmoxCluster)
-	if !ok {
-		return nil, fmt.Errorf("expected a ProxmoxCluster object for the newObj but got %T", newObj)
-	}
+// ValidateUpdate implements admission.Validator so a webhook will be registered for the type ProxmoxCluster.
+func (v *ProxmoxClusterCustomValidator) ValidateUpdate(_ context.Context, _, newObj *vrouterv1.ProxmoxCluster) (admission.Warnings, error) {
+	proxmoxcluster := newObj
 	proxmoxclusterlog.Info("Validation for ProxmoxCluster upon update", "name", proxmoxcluster.GetName())
 
 	// Skip validation while the object is being deleted. The spec may already be
@@ -139,12 +127,9 @@ func validateProxmoxCluster(cluster *vrouterv1.ProxmoxCluster) error {
 	return nil
 }
 
-// ValidateDelete implements webhook.CustomValidator so a webhook will be registered for the type ProxmoxCluster.
-func (v *ProxmoxClusterCustomValidator) ValidateDelete(ctx context.Context, obj runtime.Object) (admission.Warnings, error) {
-	proxmoxcluster, ok := obj.(*vrouterv1.ProxmoxCluster)
-	if !ok {
-		return nil, fmt.Errorf("expected a ProxmoxCluster object but got %T", obj)
-	}
+// ValidateDelete implements admission.Validator so a webhook will be registered for the type ProxmoxCluster.
+func (v *ProxmoxClusterCustomValidator) ValidateDelete(ctx context.Context, obj *vrouterv1.ProxmoxCluster) (admission.Warnings, error) {
+	proxmoxcluster := obj
 	proxmoxclusterlog.Info("Validation for ProxmoxCluster upon deletion", "name", proxmoxcluster.GetName())
 
 	// TODO(user): fill in your validation logic upon object deletion.

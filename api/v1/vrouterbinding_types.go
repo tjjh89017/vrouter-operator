@@ -19,6 +19,7 @@ package v1
 import (
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 )
 
 // VRouterBindingSpec defines the desired state of VRouterBinding.
@@ -152,5 +153,8 @@ type VRouterBindingList struct {
 }
 
 func init() {
-	SchemeBuilder.Register(&VRouterBinding{}, &VRouterBindingList{})
+	SchemeBuilder.Register(func(s *runtime.Scheme) error {
+		s.AddKnownTypes(GroupVersion, &VRouterBinding{}, &VRouterBindingList{})
+		return nil
+	})
 }
