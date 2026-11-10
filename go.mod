@@ -7,7 +7,7 @@ require (
 	github.com/Masterminds/sprig/v3 v3.3.0
 	github.com/onsi/ginkgo/v2 v2.27.4
 	github.com/onsi/gomega v1.39.0
-	github.com/tjjh89017/vrouter-daemon v0.0.0-20260328100753-4794fa0e5c03
+	github.com/tjjh89017/vrouter-daemon v0.1.0
 	google.golang.org/grpc v1.82.1
 	k8s.io/api v0.37.2
 	k8s.io/apiextensions-apiserver v0.37.2
