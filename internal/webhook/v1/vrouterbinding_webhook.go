@@ -21,12 +21,10 @@ import (
 	"fmt"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
-	"sigs.k8s.io/controller-runtime/pkg/webhook"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	vrouterv1 "github.com/tjjh89017/vrouter-operator/api/v1"
@@ -38,7 +36,7 @@ var vrouterbindinglog = logf.Log.WithName("vrouterbinding-resource")
 
 // SetupVRouterBindingWebhookWithManager registers the webhook for VRouterBinding in the manager.
 func SetupVRouterBindingWebhookWithManager(mgr ctrl.Manager) error {
-	return ctrl.NewWebhookManagedBy(mgr).For(&vrouterv1.VRouterBinding{}).
+	return ctrl.NewWebhookManagedBy(mgr, &vrouterv1.VRouterBinding{}).
 		WithValidator(&VRouterBindingCustomValidator{Client: mgr.GetClient()}).
 		WithDefaulter(&VRouterBindingCustomDefaulter{}).
 		Complete()
@@ -53,14 +51,11 @@ func SetupVRouterBindingWebhookWithManager(mgr ctrl.Manager) error {
 // as it is used only for temporary operations and does not need to be deeply copied.
 type VRouterBindingCustomDefaulter struct{}
 
-var _ webhook.CustomDefaulter = &VRouterBindingCustomDefaulter{}
+var _ admission.Defaulter[*vrouterv1.VRouterBinding] = &VRouterBindingCustomDefaulter{}
 
-// Default implements webhook.CustomDefaulter so a webhook will be registered for the Kind VRouterBinding.
-func (d *VRouterBindingCustomDefaulter) Default(_ context.Context, obj runtime.Object) error {
-	vrouterbinding, ok := obj.(*vrouterv1.VRouterBinding)
-	if !ok {
-		return fmt.Errorf("expected an VRouterBinding object but got %T", obj)
-	}
+// Default implements admission.Defaulter so a webhook will be registered for the Kind VRouterBinding.
+func (d *VRouterBindingCustomDefaulter) Default(_ context.Context, obj *vrouterv1.VRouterBinding) error {
+	vrouterbinding := obj
 	vrouterbindinglog.Info("Defaulting for VRouterBinding", "name", vrouterbinding.GetName())
 	return nil
 }
@@ -79,25 +74,19 @@ type VRouterBindingCustomValidator struct {
 	client.Client
 }
 
-var _ webhook.CustomValidator = &VRouterBindingCustomValidator{}
+var _ admission.Validator[*vrouterv1.VRouterBinding] = &VRouterBindingCustomValidator{}
 
-// ValidateCreate implements webhook.CustomValidator so a webhook will be registered for the type VRouterBinding.
-func (v *VRouterBindingCustomValidator) ValidateCreate(ctx context.Context, obj runtime.Object) (admission.Warnings, error) {
-	vrouterbinding, ok := obj.(*vrouterv1.VRouterBinding)
-	if !ok {
-		return nil, fmt.Errorf("expected a VRouterBinding object but got %T", obj)
-	}
+// ValidateCreate implements admission.Validator so a webhook will be registered for the type VRouterBinding.
+func (v *VRouterBindingCustomValidator) ValidateCreate(ctx context.Context, obj *vrouterv1.VRouterBinding) (admission.Warnings, error) {
+	vrouterbinding := obj
 	vrouterbindinglog.Info("Validation for VRouterBinding upon creation", "name", vrouterbinding.GetName())
 	warnings := deprecationWarnings(vrouterbinding)
 	return warnings, validateBinding(ctx, v.Client, vrouterbinding)
 }
 
-// ValidateUpdate implements webhook.CustomValidator so a webhook will be registered for the type VRouterBinding.
-func (v *VRouterBindingCustomValidator) ValidateUpdate(ctx context.Context, oldObj, newObj runtime.Object) (admission.Warnings, error) {
-	vrouterbinding, ok := newObj.(*vrouterv1.VRouterBinding)
-	if !ok {
-		return nil, fmt.Errorf("expected a VRouterBinding object for the newObj but got %T", newObj)
-	}
+// ValidateUpdate implements admission.Validator so a webhook will be registered for the type VRouterBinding.
+func (v *VRouterBindingCustomValidator) ValidateUpdate(ctx context.Context, oldObj, newObj *vrouterv1.VRouterBinding) (admission.Warnings, error) {
+	vrouterbinding := newObj
 	vrouterbindinglog.Info("Validation for VRouterBinding upon update", "name", vrouterbinding.GetName())
 	warnings := deprecationWarnings(vrouterbinding)
 
@@ -110,12 +99,9 @@ func (v *VRouterBindingCustomValidator) ValidateUpdate(ctx context.Context, oldO
 	return warnings, validateBinding(ctx, v.Client, vrouterbinding)
 }
 
-// ValidateDelete implements webhook.CustomValidator so a webhook will be registered for the type VRouterBinding.
-func (v *VRouterBindingCustomValidator) ValidateDelete(_ context.Context, obj runtime.Object) (admission.Warnings, error) {
-	vrouterbinding, ok := obj.(*vrouterv1.VRouterBinding)
-	if !ok {
-		return nil, fmt.Errorf("expected a VRouterBinding object but got %T", obj)
-	}
+// ValidateDelete implements admission.Validator so a webhook will be registered for the type VRouterBinding.
+func (v *VRouterBindingCustomValidator) ValidateDelete(_ context.Context, obj *vrouterv1.VRouterBinding) (admission.Warnings, error) {
+	vrouterbinding := obj
 	vrouterbindinglog.Info("Validation for VRouterBinding upon deletion", "name", vrouterbinding.GetName())
 	return nil, nil
 }

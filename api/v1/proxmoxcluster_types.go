@@ -18,6 +18,7 @@ package v1
 
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 )
 
 // ProxmoxClusterSpec defines the desired state of ProxmoxCluster.
@@ -84,5 +85,8 @@ type ProxmoxClusterList struct {
 }
 
 func init() {
-	SchemeBuilder.Register(&ProxmoxCluster{}, &ProxmoxClusterList{})
+	SchemeBuilder.Register(func(s *runtime.Scheme) error {
+		s.AddKnownTypes(GroupVersion, &ProxmoxCluster{}, &ProxmoxClusterList{})
+		return nil
+	})
 }

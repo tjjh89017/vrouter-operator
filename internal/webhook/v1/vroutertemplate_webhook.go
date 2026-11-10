@@ -21,10 +21,8 @@ import (
 	"fmt"
 	"text/template"
 
-	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
-	"sigs.k8s.io/controller-runtime/pkg/webhook"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	vrouterv1 "github.com/tjjh89017/vrouter-operator/api/v1"
@@ -37,7 +35,7 @@ var vroutertemplatelog = logf.Log.WithName("vroutertemplate-resource")
 
 // SetupVRouterTemplateWebhookWithManager registers the webhook for VRouterTemplate in the manager.
 func SetupVRouterTemplateWebhookWithManager(mgr ctrl.Manager) error {
-	return ctrl.NewWebhookManagedBy(mgr).For(&vrouterv1.VRouterTemplate{}).
+	return ctrl.NewWebhookManagedBy(mgr, &vrouterv1.VRouterTemplate{}).
 		WithValidator(&VRouterTemplateCustomValidator{}).
 		WithDefaulter(&VRouterTemplateCustomDefaulter{}).
 		Complete()
@@ -52,15 +50,10 @@ func SetupVRouterTemplateWebhookWithManager(mgr ctrl.Manager) error {
 // as it is used only for temporary operations and does not need to be deeply copied.
 type VRouterTemplateCustomDefaulter struct{}
 
-var _ webhook.CustomDefaulter = &VRouterTemplateCustomDefaulter{}
+var _ admission.Defaulter[*vrouterv1.VRouterTemplate] = &VRouterTemplateCustomDefaulter{}
 
-// Default implements webhook.CustomDefaulter so a webhook will be registered for the Kind VRouterTemplate.
-func (d *VRouterTemplateCustomDefaulter) Default(_ context.Context, obj runtime.Object) error {
-	vroutertemplate, ok := obj.(*vrouterv1.VRouterTemplate)
-
-	if !ok {
-		return fmt.Errorf("expected an VRouterTemplate object but got %T", obj)
-	}
+// Default implements admission.Defaulter so a webhook will be registered for the Kind VRouterTemplate.
+func (d *VRouterTemplateCustomDefaulter) Default(_ context.Context, vroutertemplate *vrouterv1.VRouterTemplate) error {
 	vroutertemplatelog.Info("Defaulting for VRouterTemplate", "name", vroutertemplate.GetName())
 
 	return nil
@@ -75,30 +68,24 @@ func (d *VRouterTemplateCustomDefaulter) Default(_ context.Context, obj runtime.
 // as this struct is used only for temporary operations and does not need to be deeply copied.
 type VRouterTemplateCustomValidator struct{}
 
-var _ webhook.CustomValidator = &VRouterTemplateCustomValidator{}
+var _ admission.Validator[*vrouterv1.VRouterTemplate] = &VRouterTemplateCustomValidator{}
 
-// ValidateCreate implements webhook.CustomValidator so a webhook will be registered for the type VRouterTemplate.
-func (v *VRouterTemplateCustomValidator) ValidateCreate(_ context.Context, obj runtime.Object) (admission.Warnings, error) {
-	tmpl, ok := obj.(*vrouterv1.VRouterTemplate)
-	if !ok {
-		return nil, fmt.Errorf("expected a VRouterTemplate object but got %T", obj)
-	}
+// ValidateCreate implements admission.Validator so a webhook will be registered for the type VRouterTemplate.
+func (v *VRouterTemplateCustomValidator) ValidateCreate(_ context.Context, tmpl *vrouterv1.VRouterTemplate) (admission.Warnings, error) {
 	vroutertemplatelog.Info("Validation for VRouterTemplate upon creation", "name", tmpl.GetName())
 	return nil, validateTemplateSpec(tmpl)
 }
 
-// ValidateUpdate implements webhook.CustomValidator so a webhook will be registered for the type VRouterTemplate.
-func (v *VRouterTemplateCustomValidator) ValidateUpdate(_ context.Context, _ runtime.Object, newObj runtime.Object) (admission.Warnings, error) {
-	tmpl, ok := newObj.(*vrouterv1.VRouterTemplate)
-	if !ok {
-		return nil, fmt.Errorf("expected a VRouterTemplate object for the newObj but got %T", newObj)
-	}
+// ValidateUpdate implements admission.Validator so a webhook will be registered for the type VRouterTemplate.
+func (v *VRouterTemplateCustomValidator) ValidateUpdate(
+	_ context.Context, _, tmpl *vrouterv1.VRouterTemplate,
+) (admission.Warnings, error) {
 	vroutertemplatelog.Info("Validation for VRouterTemplate upon update", "name", tmpl.GetName())
 	return nil, validateTemplateSpec(tmpl)
 }
 
-// ValidateDelete implements webhook.CustomValidator so a webhook will be registered for the type VRouterTemplate.
-func (v *VRouterTemplateCustomValidator) ValidateDelete(_ context.Context, _ runtime.Object) (admission.Warnings, error) {
+// ValidateDelete implements admission.Validator so a webhook will be registered for the type VRouterTemplate.
+func (v *VRouterTemplateCustomValidator) ValidateDelete(_ context.Context, _ *vrouterv1.VRouterTemplate) (admission.Warnings, error) {
 	return nil, nil
 }
 

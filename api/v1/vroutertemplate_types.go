@@ -18,6 +18,7 @@ package v1
 
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 )
 
 // VRouterTemplateSpec defines the desired state of VRouterTemplate.
@@ -49,5 +50,8 @@ type VRouterTemplateList struct {
 }
 
 func init() {
-	SchemeBuilder.Register(&VRouterTemplate{}, &VRouterTemplateList{})
+	SchemeBuilder.Register(func(s *runtime.Scheme) error {
+		s.AddKnownTypes(GroupVersion, &VRouterTemplate{}, &VRouterTemplateList{})
+		return nil
+	})
 }

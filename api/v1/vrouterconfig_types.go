@@ -18,6 +18,7 @@ package v1
 
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 )
 
 // VRouterConfigSpec defines the desired state of VRouterConfig.
@@ -95,5 +96,8 @@ type VRouterConfigList struct {
 }
 
 func init() {
-	SchemeBuilder.Register(&VRouterConfig{}, &VRouterConfigList{})
+	SchemeBuilder.Register(func(s *runtime.Scheme) error {
+		s.AddKnownTypes(GroupVersion, &VRouterConfig{}, &VRouterConfigList{})
+		return nil
+	})
 }

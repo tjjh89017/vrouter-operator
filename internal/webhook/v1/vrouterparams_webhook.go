@@ -20,11 +20,9 @@ import (
 	"context"
 	"fmt"
 
-	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
-	"sigs.k8s.io/controller-runtime/pkg/webhook"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	vrouterv1 "github.com/tjjh89017/vrouter-operator/api/v1"
@@ -36,7 +34,7 @@ var vrouterparamslog = logf.Log.WithName("vrouterparams-resource")
 
 // SetupVRouterParamsWebhookWithManager registers the webhook for VRouterParams in the manager.
 func SetupVRouterParamsWebhookWithManager(mgr ctrl.Manager) error {
-	return ctrl.NewWebhookManagedBy(mgr).For(&vrouterv1.VRouterParams{}).
+	return ctrl.NewWebhookManagedBy(mgr, &vrouterv1.VRouterParams{}).
 		WithValidator(&VRouterParamsCustomValidator{Client: mgr.GetClient()}).
 		WithDefaulter(&VRouterParamsCustomDefaulter{}).
 		Complete()
@@ -51,15 +49,11 @@ func SetupVRouterParamsWebhookWithManager(mgr ctrl.Manager) error {
 // as it is used only for temporary operations and does not need to be deeply copied.
 type VRouterParamsCustomDefaulter struct{}
 
-var _ webhook.CustomDefaulter = &VRouterParamsCustomDefaulter{}
+var _ admission.Defaulter[*vrouterv1.VRouterParams] = &VRouterParamsCustomDefaulter{}
 
-// Default implements webhook.CustomDefaulter so a webhook will be registered for the Kind VRouterParams.
-func (d *VRouterParamsCustomDefaulter) Default(_ context.Context, obj runtime.Object) error {
-	vrouterparams, ok := obj.(*vrouterv1.VRouterParams)
-
-	if !ok {
-		return fmt.Errorf("expected an VRouterParams object but got %T", obj)
-	}
+// Default implements admission.Defaulter so a webhook will be registered for the Kind VRouterParams.
+func (d *VRouterParamsCustomDefaulter) Default(_ context.Context, obj *vrouterv1.VRouterParams) error {
+	vrouterparams := obj
 	vrouterparamslog.Info("Defaulting for VRouterParams", "name", vrouterparams.GetName())
 
 	return nil
@@ -78,36 +72,27 @@ type VRouterParamsCustomValidator struct {
 	client.Client
 }
 
-var _ webhook.CustomValidator = &VRouterParamsCustomValidator{}
+var _ admission.Validator[*vrouterv1.VRouterParams] = &VRouterParamsCustomValidator{}
 
-// ValidateCreate implements webhook.CustomValidator so a webhook will be registered for the type VRouterParams.
-func (v *VRouterParamsCustomValidator) ValidateCreate(_ context.Context, obj runtime.Object) (admission.Warnings, error) {
-	vrouterparams, ok := obj.(*vrouterv1.VRouterParams)
-	if !ok {
-		return nil, fmt.Errorf("expected a VRouterParams object but got %T", obj)
-	}
+// ValidateCreate implements admission.Validator so a webhook will be registered for the type VRouterParams.
+func (v *VRouterParamsCustomValidator) ValidateCreate(_ context.Context, obj *vrouterv1.VRouterParams) (admission.Warnings, error) {
+	vrouterparams := obj
 	vrouterparamslog.Info("Validation for VRouterParams upon creation", "name", vrouterparams.GetName())
 
 	return nil, nil
 }
 
-// ValidateUpdate implements webhook.CustomValidator so a webhook will be registered for the type VRouterParams.
-func (v *VRouterParamsCustomValidator) ValidateUpdate(_ context.Context, _, newObj runtime.Object) (admission.Warnings, error) {
-	vrouterparams, ok := newObj.(*vrouterv1.VRouterParams)
-	if !ok {
-		return nil, fmt.Errorf("expected a VRouterParams object for the newObj but got %T", newObj)
-	}
+// ValidateUpdate implements admission.Validator so a webhook will be registered for the type VRouterParams.
+func (v *VRouterParamsCustomValidator) ValidateUpdate(_ context.Context, _, newObj *vrouterv1.VRouterParams) (admission.Warnings, error) {
+	vrouterparams := newObj
 	vrouterparamslog.Info("Validation for VRouterParams upon update", "name", vrouterparams.GetName())
 
 	return nil, nil
 }
 
-// ValidateDelete implements webhook.CustomValidator so a webhook will be registered for the type VRouterParams.
-func (v *VRouterParamsCustomValidator) ValidateDelete(ctx context.Context, obj runtime.Object) (admission.Warnings, error) {
-	vrouterparams, ok := obj.(*vrouterv1.VRouterParams)
-	if !ok {
-		return nil, fmt.Errorf("expected a VRouterParams object but got %T", obj)
-	}
+// ValidateDelete implements admission.Validator so a webhook will be registered for the type VRouterParams.
+func (v *VRouterParamsCustomValidator) ValidateDelete(ctx context.Context, obj *vrouterv1.VRouterParams) (admission.Warnings, error) {
+	vrouterparams := obj
 	vrouterparamslog.Info("Validation for VRouterParams upon deletion", "name", vrouterparams.GetName())
 
 	return nil, checkParamsNotReferenced(ctx, v.Client, vrouterparams)
