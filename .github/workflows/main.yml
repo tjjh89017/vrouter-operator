@@ -14,10 +14,10 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  K3S_VERSION: "v1.33.13+k3s1"
-  KUBEVIRT_VERSION: "v1.8.4"
+  K3S_VERSION: "v1.35.10+k3s1"
+  KUBEVIRT_VERSION: "v1.9.1"
   # Must match certmanagerVersion in test/utils/utils.go.
-  CERT_MANAGER_VERSION: "v1.16.3"
+  CERT_MANAGER_VERSION: "v1.21.3"
   # Point at a specific release's version.json to pin the guest image.
   DOZENOS_VERSION_JSON_URL: "https://github.com/dozenos/dozenos-nightly-build/releases/latest/download/version.json"
   E2E_ROUTER_CONTAINERDISK: "dozenos-e2e:latest"
